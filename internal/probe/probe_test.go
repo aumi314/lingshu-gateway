@@ -57,14 +57,14 @@ func TestTwoButtonPlanCounts(t *testing.T) {
 		}
 		return len(p.reqs)
 	}
-	if got := count(Spec{Baseline: "gpt-6.1-sol", Mode: ModeQuality}); got != 26 {
-		t.Fatalf("quality GPT requests = %d, want 26", got)
+	if got := count(Spec{Baseline: "gpt-6.1-sol", Mode: ModeQuality}); got != 30 {
+		t.Fatalf("quality GPT requests = %d, want 30", got)
 	}
 	if got := count(Spec{Baseline: "gpt-6.1-sol", Mode: ModeFingerprint}); got != 507 {
 		t.Fatalf("fingerprint GPT requests = %d, want 507", got)
 	}
-	if got := count(Spec{Baseline: "claude-opus-5-5", Mode: ModeQuality}); got != 23 {
-		t.Fatalf("quality Claude requests = %d, want 23", got)
+	if got := count(Spec{Baseline: "claude-opus-5-5", Mode: ModeQuality}); got != 27 {
+		t.Fatalf("quality Claude requests = %d, want 27", got)
 	}
 	if got := count(Spec{Baseline: "claude-opus-5-5", Mode: ModeFingerprint}); got != 390 {
 		t.Fatalf("fingerprint Claude requests = %d, want 390", got)
@@ -641,5 +641,35 @@ func TestBlockedProbesAreUntested(t *testing.T) {
 		if it := p.judgeInstruction(c.cs); it.Status != c.want || !strings.Contains(it.Summary, c.text) || strings.Contains(it.Summary, `""`) {
 			t.Errorf("%s: %+v", c.name, it)
 		}
+	}
+}
+
+// 多轮缓存：上游原样报时上一轮内容接近全部命中；中转把命中压到九成（2026-11 aresai 站长自述“降缓存”）要提示；比上一轮还多是自己算的。
+func TestJudgeChain(t *testing.T) {
+	chain := func(cached ...int64) []Call {
+		cs := []Call{{InputTokens: 33000, UsageReported: true}}
+		for k, c := range cached {
+			cs = append(cs, Call{InputTokens: 33000 + int64(k+1)*700, CachedTokens: c, UsageReported: true})
+		}
+		return cs
+	}
+	for name, test := range map[string]struct {
+		calls  []Call
+		status Status
+		words  string
+	}{
+		"原样":   {chain(32896, 33664, 34304), Pass, "命中 99%"},
+		"降缓存":  {chain(30400, 31000, 31600), Warn, "只命中 92%"},
+		"没接上":  {chain(9000, 9000, 9000), Warn, "基本没接上"},
+		"自己算的": {chain(36000, 36000, 36000), Warn, "中转自己算的"},
+		"失败":   {[]Call{{InputTokens: 33000, UsageReported: true}, {Error: "x"}}, Info, "没测成"},
+	} {
+		it, ok := judgeChain(test.calls)
+		if !ok || it.Status != test.status || !strings.Contains(it.Summary, test.words) {
+			t.Errorf("%s: %s %s", name, it.Status, it.Summary)
+		}
+	}
+	if _, ok := judgeChain(nil); ok {
+		t.Error("没有多轮请求时不出这一项")
 	}
 }

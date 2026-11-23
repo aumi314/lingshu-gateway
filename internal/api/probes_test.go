@@ -456,7 +456,7 @@ func TestProbeQualityGPT(t *testing.T) {
 		}
 	}
 	requests := up.snapshot()
-	if len(requests) != len(run.Report.Calls) || len(requests) != 26 {
+	if len(requests) != len(run.Report.Calls) || len(requests) != 30 {
 		t.Fatalf("请求数 %d，报告 %d", len(requests), len(run.Report.Calls))
 	}
 	assertProbeAuth(t, requests)
@@ -541,7 +541,7 @@ func TestProbeQualityClaude(t *testing.T) {
 		t.Fatalf("Claude 质量测试结果不对: %+v", run)
 	}
 	requests := up.snapshot()
-	if len(requests) != len(run.Report.Calls) || len(requests) != 23 {
+	if len(requests) != len(run.Report.Calls) || len(requests) != 27 {
 		t.Fatalf("Claude 请求数 = %d / %d", len(requests), len(run.Report.Calls))
 	}
 	assertProbeAuth(t, requests)

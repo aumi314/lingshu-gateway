@@ -232,3 +232,44 @@ func TestDisguiseNoToolsSuffixAndCustomTool(t *testing.T) {
 		t.Errorf("工具题不应加: %s", last)
 	}
 }
+
+// 多轮缓存：第二轮的请求开头必须和第一轮发出去的一模一样（含加在题面后的“不要用工具”），上游缓存才能接上。
+func TestProbeChainKeepsPrefix(t *testing.T) {
+	var bodies []map[string]any
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b map[string]any
+		json.NewDecoder(r.Body).Decode(&b)
+		bodies = append(bodies, b)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if strings.HasSuffix(r.URL.Path, "/messages") {
+			io.WriteString(w, probeMessagesSSE)
+		} else {
+			io.WriteString(w, probeResponsesSSE)
+		}
+	}))
+	defer up.Close()
+	d, _ := LoadProbeDisguise(writeDisguise(t, testDisguise))
+	h := &Handler{Client: up.Client(), Disguise: d}
+	first := probe.Request{Item: "chain", Prompt: "lots of text. What is 1+2?", DisguiseSet: true, FullDisguise: true}
+	second := probe.Request{Item: "chain", Prompt: "more text. What is 3+4?", History: []probe.Turn{{User: first.Prompt, Assistant: "3"}}, DisguiseSet: true, FullDisguise: true}
+
+	ch := &store.Channel{BaseURLResponses: up.URL + "/v1", BaseURLMessages: up.URL, APIKey: "k"}
+	h.ProbeResponses(context.Background(), ch, "gpt-6.1-sol", "s", first)
+	h.ProbeResponses(context.Background(), ch, "gpt-6.1-sol", "s", second)
+	a, b := bodies[0]["input"].([]any), bodies[1]["input"].([]any)
+	if len(b) != len(a)+2 || mustJSON(b[:len(a)]) != mustJSON(a) || b[len(a)].(map[string]any)["role"] != "assistant" {
+		t.Errorf("Responses 第二轮开头和第一轮不一致:\n%s\n%s", mustJSON(a), mustJSON(b))
+	}
+
+	bodies = nil
+	h.ProbeMessages(context.Background(), ch, "claude-opus-5-5", "s", first)
+	h.ProbeMessages(context.Background(), ch, "claude-opus-5-5", "s", second)
+	m1, m2 := bodies[0]["messages"].([]any), bodies[1]["messages"].([]any)
+	text := func(m any) string { return m.(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string) }
+	if len(m2) != 3 || text(m2[0]) != text(m1[0]) || m2[1].(map[string]any)["role"] != "assistant" {
+		t.Errorf("Messages 第二轮开头和第一轮不一致:\n%s\n%s", mustJSON(m1), mustJSON(m2))
+	}
+	if !strings.Contains(mustJSON(m2[2]), `"cache_control":{"type":"ephemeral"}`) || strings.Contains(mustJSON(m2[0]), "cache_control") {
+		t.Errorf("缓存断点应只在最后一条消息上（和 Claude Code 一样）: %s", mustJSON(m2))
+	}
+}
