@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/aumi314/lingshu/internal/probe"
 )
 
 // ProbeDisguise 是模型检测的伪装配置：让检测请求看起来和真实的 Claude Code / Codex 客户端一样，
@@ -124,14 +126,26 @@ func (d *ProbeDisguise) claudeSystem(model, extra string) []map[string]any {
 }
 
 // codexInput 返回伪装的 input 前缀（填好日期），后面接检测的系统指令（开发者消息）和问题。
-func (d *ProbeDisguise) codexInput(system, prompt string, now time.Time) []any {
+func (d *ProbeDisguise) codexInput(system string, history []probe.Turn, prompt string, now time.Time) []any {
 	var items []any
 	s := strings.ReplaceAll(string(d.Codex.Input), "{{DATE}}", now.Format("2006-01-02"))
 	json.Unmarshal([]byte(s), &items)
 	if system != "" {
 		items = append(items, map[string]any{"type": "message", "role": "developer", "content": []map[string]any{{"type": "input_text", "text": system}}})
 	}
+	items = append(items, responsesTurns(history)...)
 	return append(items, map[string]any{"type": "message", "role": "user", "content": []map[string]any{{"type": "input_text", "text": prompt}}})
+}
+
+// responsesTurns 把前面几轮对话写成 Responses 的 input 项。
+func responsesTurns(history []probe.Turn) []any {
+	var out []any
+	for _, t := range history {
+		out = append(out,
+			map[string]any{"type": "message", "role": "user", "content": []map[string]any{{"type": "input_text", "text": t.User}}},
+			map[string]any{"type": "message", "role": "assistant", "content": []map[string]any{{"type": "output_text", "text": t.Assistant}}})
+	}
+	return out
 }
 
 // codexSessionMeta 生成 Codex 每个请求带的会话元数据（和真实 Codex 0.160 同样的字段）：请求头 x-codex-turn-metadata 和请求体 client_metadata 共用。

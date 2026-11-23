@@ -80,6 +80,9 @@ func (h *Handler) probeChatOnce(ctx context.Context, ch *store.Channel, upstream
 	if req.System != "" {
 		msgs = append(msgs, map[string]string{"role": "system", "content": req.System})
 	}
+	for _, t := range req.History {
+		msgs = append(msgs, map[string]string{"role": "user", "content": t.User}, map[string]string{"role": "assistant", "content": t.Assistant})
+	}
 	msgs = append(msgs, map[string]string{"role": "user", "content": req.Prompt})
 	body := map[string]any{"model": upstreamModel, "messages": msgs, "stream": true, "stream_options": map[string]any{"include_usage": true}}
 	if req.Effort != "" {

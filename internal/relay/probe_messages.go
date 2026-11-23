@@ -75,8 +75,24 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 			maxTokens = d.Claude.MaxTokens
 		}
 	}
+	// 前面几轮的用户消息和当时发出去的一样，前缀才对得上；完整伪装下和 Claude Code 一样在最后一条消息上打缓存断点
+	hasTools := d.hasClaude() && len(d.Claude.Tools) > 0
+	var messages []map[string]any
+	for _, t := range req.History {
+		messages = append(messages, map[string]any{"role": "user", "content": []map[string]any{{"type": "text", "text": d.directPrompt(t.User, len(req.Tools) > 0, hasTools)}}},
+			map[string]any{"role": "assistant", "content": []map[string]any{{"type": "text", "text": t.Assistant}}})
+	}
+	if d.hasClaude() {
+		blocks, ok := content.([]map[string]any)
+		if !ok {
+			blocks = []map[string]any{{"type": "text", "text": content}}
+		}
+		blocks[len(blocks)-1]["cache_control"] = map[string]any{"type": "ephemeral"}
+		content = blocks
+	}
+	messages = append(messages, map[string]any{"role": "user", "content": content})
 	body := map[string]any{"model": upstreamModel, "max_tokens": maxTokens, "stream": true, "system": system,
-		"messages": []map[string]any{{"role": "user", "content": content}}, "metadata": map[string]any{"user_id": string(userID)}}
+		"messages": messages, "metadata": map[string]any{"user_id": string(userID)}}
 	if req.Effort != "" {
 		body["thinking"] = map[string]any{"type": "adaptive"}
 		body["output_config"] = map[string]any{"effort": req.Effort}

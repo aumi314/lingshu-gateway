@@ -28,20 +28,26 @@ func (p *plan) needle(effort string, tokensPerSentence int) Request {
 		}
 		p.needleCodes = append(p.needleCodes, string(b))
 	}
-	sentences := make([]string, p.suite.Needle.Tokens/tokensPerSentence)
-	for i := range sentences {
-		ws := make([]string, 9)
-		for j := range ws {
-			ws[j] = needleWords[p.rng.IntN(len(needleWords))]
-		}
-		sentences[i] = strings.ToUpper(ws[0][:1]) + strings.Join(ws, " ")[1:] + "."
-	}
+	sentences := p.sentences(p.suite.Needle.Tokens / tokensPerSentence)
 	for k, frac := range needleAt {
 		at := int(float64(len(sentences)) * frac)
 		sentences = append(sentences[:at], append([]string{fmt.Sprintf("Important: secret code number %d is %s.", k+1, p.needleCodes[k])}, sentences[at:]...)...)
 	}
 	q := strings.Join(sentences, " ") + "\n\nThe text above contains three secret codes (numbers 1, 2 and 3). List them in order, one per line, nothing else."
 	return Request{Item: "needle", Prompt: q, Effort: effort, MaxTokens: 256}
+}
+
+// sentences 生成 n 句随机英文（每句 9 个随机词），大海捞针和多轮缓存的填充文本。
+func (p *plan) sentences(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		ws := make([]string, 9)
+		for j := range ws {
+			ws[j] = needleWords[p.rng.IntN(len(needleWords))]
+		}
+		out[i] = strings.ToUpper(ws[0][:1]) + strings.Join(ws, " ")[1:] + "."
+	}
+	return out
 }
 
 // needleMinTokens：上游报的输入 token 低于这个数，说明长文没有完整送到模型（正常约 9 万）。
@@ -197,6 +203,7 @@ func (p *plan) buildProtocolQuality() {
 	p.echoTag = "<" + randomCode(p, "abcdefghijklmnopqrstuvwxyz0123456789", 20) + ">"
 	p.spread(Request{Item: "echo", MaxTokens: 128, Prompt: "This request carries a check tag: " + p.echoTag + ". Output that tag exactly, nothing else."})
 	p.add(p.needle("", 24))
+	p.cacheChain(24)
 }
 
 func randomCode(p *plan, alphabet string, n int) string {
@@ -252,6 +259,7 @@ func (p *plan) reportProtocol(calls []Call) *Report {
 		anchors = by["tokens"]
 	}
 	r.Observations = disguiseInjection(observe(calls, anchors[:min(1, len(anchors))], by["anchor"], nil, nearest), p.spec)
+	r.Observations = withChain(r.Observations, by["chain"])
 	if !p.legacy {
 		r.Observations = qualityObservations(r.Observations)
 	}

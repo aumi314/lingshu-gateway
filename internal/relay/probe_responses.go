@@ -53,7 +53,11 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 		if d.Codex.ReasoningContext != "" {
 			reasoning["context"] = d.Codex.ReasoningContext
 		}
-		body["input"] = d.codexInput(req.System, d.directPrompt(req.Prompt, len(req.Tools) > 0, true), now)
+		var history []probe.Turn
+		for _, t := range req.History { // 前面几轮的用户消息和当时发出去的一样，前缀才对得上
+			history = append(history, probe.Turn{User: d.directPrompt(t.User, len(req.Tools) > 0, true), Assistant: t.Assistant})
+		}
+		body["input"] = d.codexInput(req.System, history, d.directPrompt(req.Prompt, len(req.Tools) > 0, true), now)
 		var clientMeta map[string]any
 		turnMeta, clientMeta = d.codexSessionMeta(session, upstreamModel, req.Effort, now)
 		body["client_metadata"] = clientMeta
@@ -62,7 +66,7 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 		if req.System != "" {
 			input = append(input, map[string]any{"type": "message", "role": "developer", "content": []map[string]any{{"type": "input_text", "text": req.System}}})
 		}
-		body["input"] = append(input, map[string]any{"type": "message", "role": "user", "content": []map[string]any{{"type": "input_text", "text": req.Prompt}}})
+		body["input"] = append(append(input, responsesTurns(req.History)...), map[string]any{"type": "message", "role": "user", "content": []map[string]any{{"type": "input_text", "text": req.Prompt}}})
 		if req.MaxTokens > 0 {
 			body["max_output_tokens"] = max(req.MaxTokens, 16) // Responses 协议下限 16
 		}

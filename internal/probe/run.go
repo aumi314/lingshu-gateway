@@ -22,6 +22,7 @@ type Request struct {
 	Session        int              // 用第几个会话编号发（一次检测用 Sessions 个，号池按会话路由，多个会话才能抽查到不同上游）
 	System         string           // 系统提示，空表示不带
 	Prompt         string           // 用户消息
+	History        []Turn           // 同一会话前面几轮的对话，按顺序放在 Prompt 前面（多轮缓存检测用）
 	Effort         string           // 推理强度，空表示不指定
 	MaxTokens      int              // 0 表示不限
 	ResponseFormat map[string]any   // 结构化输出
@@ -29,6 +30,12 @@ type Request struct {
 	Document       string           // 附带的 PDF（base64），只用于 Claude
 	FullDisguise   bool             // true 时使用服务器的真实客户端模板
 	DisguiseSet    bool             `json:"-"` // false keeps legacy relay behavior for direct callers
+}
+
+// Turn 是一轮已经发生的对话：用户说的和模型回的。
+type Turn struct {
+	User      string
+	Assistant string
 }
 
 // ToolCall 是模型发起的一次工具调用。
@@ -234,7 +241,11 @@ func Run(ctx context.Context, call Caller, spec Spec, progress Progress) (*Repor
 					c.Error = "模型调用了工具 " + c.ToolCalls[0].Name + "，没有直接回答"
 				}
 				calls[i] = c
-				expected := baseTokens + int64((utf8.RuneCountInString(req.System)+utf8.RuneCountInString(req.Prompt))/3)
+				runes := utf8.RuneCountInString(req.System) + utf8.RuneCountInString(req.Prompt)
+				for _, h := range req.History {
+					runes += utf8.RuneCountInString(h.User) + utf8.RuneCountInString(h.Assistant)
+				}
+				expected := baseTokens + int64(runes/3)
 				msg := strings.ToLower(c.Error)
 				stopMu.Lock()
 				if stopReason == "" {
@@ -279,7 +290,7 @@ func Run(ctx context.Context, call Caller, spec Spec, progress Progress) (*Repor
 		verifySet[i] = true
 	}
 	for i := range plan.reqs {
-		if !verifySet[i] && plan.reqs[i].Item != "needle" {
+		if !verifySet[i] && plan.reqs[i].Item != "needle" && plan.reqs[i].Item != "chain" {
 			rest = append(rest, i)
 		}
 	}
@@ -303,6 +314,12 @@ func Run(ctx context.Context, call Caller, spec Spec, progress Progress) (*Repor
 	}
 	for index, request := range plan.reqs {
 		if request.Item == "needle" && child.Err() == nil {
+			execute([]int{index}, 1, false)
+		}
+	}
+	// 多轮缓存：一轮发完再发下一轮，上一轮的缓存写好了才测得到接续
+	for index, request := range plan.reqs {
+		if request.Item == "chain" && child.Err() == nil {
 			execute([]int{index}, 1, false)
 		}
 	}
@@ -624,6 +641,11 @@ func (p *plan) buildQuality() {
 	p.marker = fmt.Sprintf("[[END-%04x]]", p.rng.IntN(0x10000))
 	p.spread(Request{Item: "instruction", MaxTokens: 128, System: "Always end every reply with the exact marker " + p.marker + " on its own line.", Prompt: "Say hello in one short sentence."})
 	p.add(p.needle(s.Needle.Effort, 12))
+	if strings.HasPrefix(p.spec.Baseline, "claude") {
+		p.cacheChain(24) // 同一段英文 Claude 的 token 数约是 GPT 的 2.2 倍，句子减半，两家都约 2 万 token
+	} else {
+		p.cacheChain(11)
+	}
 }
 
 // ---- 评判 ----
@@ -679,6 +701,7 @@ func (p *plan) report(calls []Call) *Report {
 	if !p.legacy {
 		r.Observations = qualityObservations(r.Observations)
 	}
+	r.Observations = withChain(r.Observations, by["chain"])
 	r.Metrics = metrics(calls)
 	finalize(r, hint)
 	return r
