@@ -64,7 +64,7 @@ lingshu/
 | `channel_models` | channel_id、model_id、upstream_name | 名称映射；upstream_name 为空表示和标准名相同 |
 | `api_keys` | user_id、name、key_hash、key_prefix、group_id、quota_limit、quota_used、enabled、expires_at、last_used_at | 只存哈希，完整 key 创建时只显示一次 |
 | `request_logs` | 见下 | 一个客户端请求一行 |
-| `projects` / `project_members` / `project_groups` | 池子余额与冻结、每周上限、邀请码；成员与审批状态；开放分组 | 项目额度：项目 key（`api_keys.project_id`）从项目池扣，日志记 `project_id` |
+| `projects` / `project_members` / `project_groups` | 池子余额与冻结、邀请码；成员、审批状态和每人额度上限（按天 / 周 / 月）；开放分组 | 项目额度：项目 key（`api_keys.project_id`）从项目池扣，日志记 `project_id` |
 | `request_captures` / `conversation_blobs` | 骨架、回复 / 去重的内容块 | 对话留存：每次调用一条骨架，消息和 system、tools 按 SHA-256 去重存块（gzip） |
 | `balance_adjustments` | user_id、amount、balance_after、operator_id、note、topup_order_id | 管理员调整及自动充值流水，订单关联唯一 |
 | `payment_config_versions` / `payment_services` | provider、config、secrets / enabled、version_id | 不可变商户配置版本与当前服务开关 |
@@ -123,7 +123,7 @@ lingshu/
 | 网关 | chat / messages / responses / systemone 四个入口透传，Messages / Responses 双向转接（应急开关在系统设置「调用设置」）；优先级分档、渠道亲和、按分组次数换渠道重试、冷却；预扣费、按用户的并发和频率限制；GPT Fast 档位计费 |
 | 计费 | 模型四项单价 + 价格规则（长上下文、日期、时段、周末）× 分组倍率（集合按实际成员的倍率）；汇率手动或实时（Frankfurter） |
 | 渠道 | 标准模板与各厂商官方模板（含 OpenRouter、Gemini、Anthropic、TypeSafe / Nace、OpenCode Zen、NVIDIA）、渠道代理、按需余额查询、24 小时连接状态、冒烟测试 ；一个渠道多把 key（上限 50，会话固定、限流 / 失效自动换 key）、渠道备注；模型映射识别厂商前缀和版本号分隔符 |
-| 用户 | 超级管理员 / 管理员 / 成员；用户分组控制服务分组可见范围；注册码注册；API key 可选过期时间与点击行编辑、用户编辑右侧抽屉；登录防护（频率限制 + 工作量证明）；项目额度（创建人转入的共享额度池、邀请码加审批、每周上限、开放分组，组件默认关） |
+| 用户 | 超级管理员 / 管理员 / 成员；用户分组控制服务分组可见范围；注册码注册；API key 可选过期时间与点击行编辑、用户编辑右侧抽屉；登录防护（频率限制 + 工作量证明）；项目额度（创建人转入的共享额度池、邀请码加审批、创建人给每个成员设额度上限、开放分组，组件默认关） |
 | 钱包 | 五家支付适配（EPay 已真实开放）、兑换码独立开关（同步钱包入口与兑换接口）、用 API key 查余额（`/v1/usage`） |
 | 日志 | 调用日志（耗时拆分、IP、推理强度、换渠道失败记录）+ 操作日志（同事务写入、改前改后对比）；对话留存（组件默认关，按会话去重存请求和客户端实际收到的回复，管理员在请求详情查看和下载） |
 | 模型检测 | 管理端区分渠道质量（完整伪装，含分词）与模型指纹（传输层伪装，只看答案分布、给匹配度）；短请求先核验用量和额度，提前中止时保留报告；质量测试会指出零推理作答、缓存数不是上游原样；旧记录继续可查。手测 GPT 渠道用 `scripts/probe/gpt_channel_check.py`、`gpt_multiturn.py`。规则见 [模型检测](decisions.md#模型检测) |
