@@ -68,7 +68,8 @@ func judgeChain(cs []Call) (Item, bool) {
 	rate, share := float64(hit)/float64(prev), float64(hit)/float64(input)
 	it.Details = map[string]any{"turns": turns, "hit_rate": rate, "cached_share": share}
 	pct := func(x float64) int { return int(math.Round(x * 100)) }
-	tail := fmt.Sprintf("（每轮输入里缓存占 %d%%，和调用日志的缓存率同一口径）", pct(share))
+	// 缓存占比向下取整，和调用日志一致：没全中时不显示成 100%
+	tail := fmt.Sprintf("（每轮输入里缓存占 %d%%，和调用日志的缓存率同一口径）", int(math.Floor(share*100)))
 	switch {
 	case rate > 1.02:
 		it.Status, it.Summary = Warn, fmt.Sprintf("缓存数比上一轮的全部内容还多（%d%%），是中转自己算的，不是上游原样", pct(rate))+tail
