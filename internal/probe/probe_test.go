@@ -658,7 +658,7 @@ func TestJudgeChain(t *testing.T) {
 		status Status
 		words  string
 	}{
-		"原样":   {chain(32896, 33664, 34304), Pass, "命中 99%"},
+		"原样":   {chain(32896, 33664, 34304), Pass, "每轮都接上"},
 		"降缓存":  {chain(30400, 31000, 31600), Warn, "只命中 92%"},
 		"没接上":  {chain(9000, 9000, 9000), Warn, "基本没接上"},
 		"自己算的": {chain(36000, 36000, 36000), Warn, "中转自己算的"},

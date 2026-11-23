@@ -134,7 +134,7 @@ export default function Probes() {
               })} />
           </Form.Item>
           <Space>
-            <Tooltip title={t('约 9–26 个请求，检查分词、推理、工具、指令和上下文', 'About 9–26 requests covering tokenization, reasoning, tools, instructions and context')}>
+            <Tooltip title={t('约 13–30 个请求，检查分词、推理、工具、指令、长上下文和多轮缓存', 'About 13–30 requests covering tokenization, reasoning, tools, instructions, long context and multi-turn caching')}>
               <Button type="primary" loading={startingMode === 'quality'} disabled={!!startingMode} onClick={() => void start('quality')}>{t('渠道质量测试', 'Channel quality')}</Button>
             </Tooltip>
             <Tooltip title={t('约 390–507 个短请求，按答案分布计算型号匹配度', 'About 390–507 short requests to score model similarity from answer distributions')}>
@@ -373,6 +373,15 @@ function Details({ item }: { item: Item }) {
             </span>
           ))}
         </>}
+      </Space>
+    )
+  }
+  if (Array.isArray(d.turns)) {
+    return (
+      <Space direction="vertical" size={2}>
+        {(d.turns as { turn: number; previous_input: number; input: number; cached: number }[]).map((x) => (
+          <span key={x.turn}>{t(`第 ${x.turn} 轮：上一轮共 ${x.previous_input} 个输入 token，这一轮命中缓存 ${x.cached}（这一轮输入 ${x.input}）`, `Turn ${x.turn}: previous input ${x.previous_input}, cached ${x.cached} (input ${x.input})`)}</span>
+        ))}
       </Space>
     )
   }
