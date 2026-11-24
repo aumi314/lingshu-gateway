@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// 多轮缓存（docs/decisions.md「模型检测」）：同一会话连着聊几轮，看每轮的缓存有没有接上上一轮的全部内容。
+// 缓存命中率（docs/decisions.md「模型检测」，计分的检测项）：同一会话连着聊几轮，看每轮的缓存有没有接上上一轮的全部内容。
 // 和生产里的多轮对话同一个口径；中转少报缓存（比如为了利润把命中压到九成）在这里直接看得出来，缓存读比全价输入便宜一个数量级，少报就是多收钱。
 
 const (
@@ -30,27 +30,12 @@ func (p *plan) cacheChain(tokensPerSentence int) {
 	}
 }
 
-// withChain 把多轮缓存的结论放在“缓存计数”后面（没有就放最后）。
-func withChain(obs []Item, cs []Call) []Item {
-	it, ok := judgeChain(cs)
-	if !ok {
-		return obs
-	}
-	at := len(obs)
-	for i, o := range obs {
-		if o.Key == "cache" {
-			at = i + 1
-		}
-	}
-	return append(obs[:at], append([]Item{it}, obs[at:]...)...)
-}
-
 // judgeChain：每轮命中的缓存 ÷ 上一轮的全部输入。上游原样报时接近 100%（OpenAI 按 128 token 一块命中，只差最后不满一块的部分）。
 func judgeChain(cs []Call) (Item, bool) {
 	if len(cs) == 0 {
 		return Item{}, false
 	}
-	it := Item{Key: "cache_chain", Title: "多轮缓存"}
+	it := Item{Key: "cache_chain", Title: "缓存命中率"}
 	var prev, hit, input int64
 	turns := []map[string]any{}
 	for k := 1; k < len(cs); k++ {
@@ -62,23 +47,23 @@ func judgeChain(cs []Call) (Item, bool) {
 		turns = append(turns, map[string]any{"turn": k + 1, "previous_input": a.InputTokens, "input": b.InputTokens, "cached": b.CachedTokens})
 	}
 	if prev == 0 {
-		it.Status, it.Summary = Info, "多轮对话没测成（请求失败或上游没报用量）"
+		it.Status, it.Summary = Info, "没测成（请求失败或上游没报用量）"
 		return it, true
 	}
 	rate, share := float64(hit)/float64(prev), float64(hit)/float64(input)
 	it.Details = map[string]any{"turns": turns, "hit_rate": rate, "cached_share": share}
 	pct := func(x float64) int { return int(math.Round(x * 100)) }
-	// 缓存占比向下取整，和调用日志一致：没全中时不显示成 100%
-	tail := fmt.Sprintf("（每轮输入里缓存占 %d%%，和调用日志的缓存率同一口径）", int(math.Floor(share*100)))
+	// 开头的命中率是每轮输入里缓存的占比，和调用日志的缓存率同一口径、同样向下取整（没全中时不显示成 100%）
+	head := fmt.Sprintf("%d%%：", int(math.Floor(share*100)))
 	switch {
 	case rate > 1.02:
-		it.Status, it.Summary = Warn, fmt.Sprintf("缓存数比上一轮的全部内容还多（%d%%），是中转自己算的，不是上游原样", pct(rate))+tail
+		it.Status, it.Summary = Warn, head+fmt.Sprintf("缓存数比上一轮的全部内容还多（%d%%），是中转自己算的，不是上游原样", pct(rate))
 	case rate >= 0.97:
-		it.Status, it.Summary = Pass, fmt.Sprintf("连着聊 %d 轮，每轮都接上了上一轮的缓存：上一轮内容命中 %d%%", len(turns)+1, pct(rate))+tail
+		it.Status, it.Summary = Pass, head+fmt.Sprintf("同一会话连聊 %d 轮，每轮都完整接上了上一轮的内容（%d%%），和调用日志的缓存率同一口径", len(turns)+1, pct(rate))
 	case rate >= 0.5:
-		it.Status, it.Summary = Warn, fmt.Sprintf("上一轮内容只命中 %d%%：多轮对话里本该命中缓存的输入，约 %d%% 按全价计费", pct(rate), 100-pct(rate))+tail
+		it.Status, it.Summary = Warn, head+fmt.Sprintf("每轮只接上了上一轮内容的 %d%%，本该走缓存的输入约有 %d%% 按全价计费", pct(rate), 100-pct(rate))
 	default:
-		it.Status, it.Summary = Warn, fmt.Sprintf("多轮对话基本没接上缓存：上一轮内容只命中 %d%%，大部分输入按全价计费", pct(rate))+tail
+		it.Status, it.Summary = Warn, head+fmt.Sprintf("每轮只接上了上一轮内容的 %d%%，大部分输入按全价计费", pct(rate))
 	}
 	return it, true
 }

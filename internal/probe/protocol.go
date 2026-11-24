@@ -254,12 +254,14 @@ func (p *plan) reportProtocol(calls []Call) *Report {
 	if len(by["needle"]) > 0 {
 		r.Items = append(r.Items, p.judgeNeedle(by["needle"]))
 	}
+	if it, ok := judgeChain(by["chain"]); ok { // 缓存命中率计分，但不当门槛：最差是需关注
+		r.Items = append(r.Items, it)
+	}
 	anchors := by["anchor"]
 	if !p.legacy && len(by["tokens"]) > 0 {
 		anchors = by["tokens"]
 	}
 	r.Observations = disguiseInjection(observe(calls, anchors[:min(1, len(anchors))], by["anchor"], nil, nearest), p.spec)
-	r.Observations = withChain(r.Observations, by["chain"])
 	if !p.legacy {
 		r.Observations = qualityObservations(r.Observations)
 	}
