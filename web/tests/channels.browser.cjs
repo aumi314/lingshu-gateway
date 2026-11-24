@@ -192,6 +192,7 @@ const path = require('node:path')
     // 全部取消勾选后确认：接入与映射一起移除，空态文案出现。
     await picker.waitFor({ state: 'hidden' })
     await drawer.locator('button').filter({ hasText: '从上游拉取模型' }).click()
+    await picker.getByRole('checkbox', { name: /provider\/foo-1-2.3/ }).waitFor() // 弹窗渲染完再数，否则一开始数到 0 直接跳过
     while (await checkedCount() > 0) await picker.locator('input[type="checkbox"]:checked').first().uncheck()
     assert.equal(await checkedCount(), 0)
     await picker.getByRole('button', { name: /确\s*定/ }).click()
