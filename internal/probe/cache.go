@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// 多轮缓存（docs/decisions.md「模型检测」）：同一会话连着聊几轮，看每轮的缓存有没有接上上一轮的全部内容。
+// 缓存命中率（docs/decisions.md「模型检测」，计分的检测项）：同一会话连着聊几轮，看每轮的缓存有没有接上上一轮的全部内容。
 // 和生产里的多轮对话同一个口径；中转少报缓存（比如为了利润把命中压到九成）在这里直接看得出来，缓存读比全价输入便宜一个数量级，少报就是多收钱。
 
 const (
@@ -28,21 +28,6 @@ func (p *plan) cacheChain(tokensPerSentence int) {
 		p.add(Request{Item: "chain", Prompt: prompt, History: append([]Turn(nil), history...), MaxTokens: 16})
 		history = append(history, Turn{User: prompt, Assistant: fmt.Sprint(a + b)})
 	}
-}
-
-// withChain 把多轮缓存的结论放在“缓存计数”后面（没有就放最后）。
-func withChain(obs []Item, cs []Call) []Item {
-	it, ok := judgeChain(cs)
-	if !ok {
-		return obs
-	}
-	at := len(obs)
-	for i, o := range obs {
-		if o.Key == "cache" {
-			at = i + 1
-		}
-	}
-	return append(obs[:at], append([]Item{it}, obs[at:]...)...)
 }
 
 // judgeChain：每轮命中的缓存 ÷ 上一轮的全部输入。上游原样报时接近 100%（OpenAI 按 128 token 一块命中，只差最后不满一块的部分）。

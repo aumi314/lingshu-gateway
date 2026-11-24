@@ -693,6 +693,9 @@ func (p *plan) report(calls []Call) *Report {
 	if len(by["needle"]) > 0 {
 		r.Items = append(r.Items, p.judgeNeedle(by["needle"]))
 	}
+	if it, ok := judgeChain(by["chain"]); ok { // 缓存命中率计分，但不当门槛：最差是需关注
+		r.Items = append(r.Items, it)
+	}
 	anchors := by["tokens"]
 	if len(anchors) == 0 {
 		anchors = by["anchor"]
@@ -701,7 +704,6 @@ func (p *plan) report(calls []Call) *Report {
 	if !p.legacy {
 		r.Observations = qualityObservations(r.Observations)
 	}
-	r.Observations = withChain(r.Observations, by["chain"])
 	r.Metrics = metrics(calls)
 	finalize(r, hint)
 	return r

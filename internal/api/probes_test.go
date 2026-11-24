@@ -450,7 +450,7 @@ func TestProbeQualityGPT(t *testing.T) {
 	for _, item := range run.Report.Items {
 		status[item.Key] = item.Status
 	}
-	for _, key := range []string{"tokens", "structured", "instruction", "needle"} {
+	for _, key := range []string{"tokens", "structured", "instruction", "needle", "cache_chain"} {
 		if status[key] == "" {
 			t.Errorf("缺少检测项 %s: %+v", key, status)
 		}
