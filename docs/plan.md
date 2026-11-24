@@ -135,7 +135,7 @@ lingshu/
 
 - **模型检测完善**
   - 鹈鹕只作参考、不进页面检测（xhigh 单次也只有约三分之一真实蹬踏，见 `research/model-probe.md`）。
-  - GPT-6.2 官方样本：官方 Codex 账号已只提供 6.2-sol / 6.2-astra（旧 6.1-sol、6-astra 样本保留，用来认出冒充）。每个型号每轮约 1200 个请求、要两轮，会占用用户的 Codex 额度，开跑前先和用户确认；采完重选 GPT 题池和 sol / astra 专用题组（最难分的是 6.2-sol 对 6.1-sol、6.2-sol 对 6.2-astra）。2026-11-18 第一轮只留下分词数据，在本机 `~/worktrees/probe-62/`。
+  - GPT-6.2 官方样本：官方 Codex 账号已只提供 6.2-sol / 6.2-astra（旧 6.1-sol、6-astra 样本保留，用来认出冒充）。每个型号每轮约 1200 个请求、要两轮，会占用用户的 Codex 额度，开跑前先和用户确认；采完重选 GPT 题池和 sol / astra 专用题组（最难分的是 6.2-sol 对 6.1-sol、6.2-sol 对 6.2-astra）。6.2-sol 第一轮 2026-11-23 采完（`codex_gpt-6.2-sol-r1.json`，已能作对照）；还差 6.2-sol 第二轮和 6.2-astra 两轮。采样脚本每个请求落盘、重跑接着采。
   - 第三方检测站（hvoy、ztest、cctest）的抓包在 `references/probe-sites/`，结论见 `research/model-probe.md`。借鉴项还剩：Claude 服务端工具（web_search、code_execution）和图片输入。数字序列指纹已评估，分不清具体型号，不接入（见 `research/model-probe.md`）。
   - 知识时效题库：提示词要求直接回答、禁止联网搜索、禁止参考对话；用官方账号采集四个型号的样本。
   - 官方 API 环境（无 Codex 注入提示词）的样本：luna 在 API 环境下距离 0.44，贴近阈值。
