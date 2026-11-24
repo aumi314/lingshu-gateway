@@ -134,7 +134,7 @@ export default function Probes() {
               })} />
           </Form.Item>
           <Space>
-            <Tooltip title={t('约 13–30 个请求，检查分词、推理、工具、指令、长上下文和多轮缓存', 'About 13–30 requests covering tokenization, reasoning, tools, instructions, long context and multi-turn caching')}>
+            <Tooltip title={t('约 13–30 个请求，检查分词、推理、工具、指令、长上下文和缓存命中率', 'About 13–30 requests covering tokenization, reasoning, tools, instructions, long context and cache hit rate')}>
               <Button type="primary" loading={startingMode === 'quality'} disabled={!!startingMode} onClick={() => void start('quality')}>{t('渠道质量测试', 'Channel quality')}</Button>
             </Tooltip>
             <Tooltip title={t('约 390–507 个短请求，按答案分布计算型号匹配度', 'About 390–507 short requests to score model similarity from answer distributions')}>
