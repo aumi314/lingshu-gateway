@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 import urllib.error
+import unicodedata
 import urllib.request
 import uuid
 from itertools import combinations
@@ -224,9 +225,26 @@ def probe_tokens(args):
 
 # ---- 单词指纹：几十个“随机说一个”的问题，每题多次，答案分布就是指纹 ----
 
+LATIN_EXTRA = {"ł": "l", "ø": "o", "đ": "d", "ß": "ss", "æ": "ae", "œ": "oe", "þ": "th", "ð": "d"}
+
+
+def fold(text):
+    """去掉拉丁字母上的重音（týr→tyr、comté→comte、ł→l），假名和汉字不动；和 Go 的 Fold 一致。"""
+    out = []
+    for ch in text:
+        if ch in LATIN_EXTRA:
+            out.append(LATIN_EXTRA[ch])
+        elif ord(ch) < 0x250:
+            out.append("".join(c for c in unicodedata.normalize("NFKD", ch) if not unicodedata.combining(c)))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+
 def normalize(text):
-    """去掉空白和标点、转小写；保留各种文字（希腊字母、汉字等）。清洗后为空（比如只回了表情符号）就保留原样。"""
-    cleaned = re.sub(r"[\W_]", "", text.lower())
+    """去掉空白和标点、转小写、去掉拉丁字母重音；保留各种文字（希腊字母、汉字等）。清洗后为空（比如只回了表情符号）就保留原样。"""
+    cleaned = re.sub(r"[\W_]", "", fold(text.lower()))
     return (cleaned or text.strip())[:40]
 
 
@@ -653,7 +671,7 @@ def distributions(files, out):
         # 自身波动：每个型号的答案一分为二，两半之间的总变差；型号之间也按同样的样本量（各取一半）比，才公平
         halves = {m: (a[: len(a) // 2], a[len(a) // 2:]) for m, a in models.items() if len(a) >= 6}
         self_noise = [tvd(h[0], h[1]) for h in halves.values()]
-        between = [tvd(x[0], y[1]) for (_, x), (_, y) in combinations(halves.items(), 2)]
+        between = [tvd(x[0], y[1]) for (_, x), (_, y) in combinations(sorted(halves.items()), 2)]  # 型号按名字排序，和 Go 里 SeparatingPrompts 同一顺序
         score = statistics.mean(between) - statistics.mean(self_noise) if self_noise and between else None
         result.append({
             "prompt": q,

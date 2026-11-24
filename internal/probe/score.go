@@ -106,7 +106,8 @@ func SeparatingPrompts(minScore float64, family string) []string {
 				pairs++
 			}
 		}
-		if between/float64(pairs)-self/float64(len(halves)) >= minScore {
+		// 四舍五入到三位再比，和脚本 dist 一致：0.3 边界上的题不会因为浮点误差时进时出
+		if round3(between/float64(pairs)-self/float64(len(halves))) >= minScore {
 			out = append(out, q)
 		}
 	}

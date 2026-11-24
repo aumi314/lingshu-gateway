@@ -60,8 +60,8 @@ func TestTwoButtonPlanCounts(t *testing.T) {
 	if got := count(Spec{Baseline: "gpt-6.1-sol", Mode: ModeQuality}); got != 30 {
 		t.Fatalf("quality GPT requests = %d, want 30", got)
 	}
-	if got := count(Spec{Baseline: "gpt-6.1-sol", Mode: ModeFingerprint}); got != 507 {
-		t.Fatalf("fingerprint GPT requests = %d, want 507", got)
+	if got := count(Spec{Baseline: "gpt-6.1-sol", Mode: ModeFingerprint}); got != 663 {
+		t.Fatalf("fingerprint GPT requests = %d, want 663", got)
 	}
 	if got := count(Spec{Baseline: "claude-opus-5-5", Mode: ModeQuality}); got != 27 {
 		t.Fatalf("quality Claude requests = %d, want 27", got)
@@ -80,10 +80,10 @@ func TestNormalizeAndFold(t *testing.T) {
 	}
 }
 
-// 区分作用强的题数和脚本 dist 算出来的一致（含第 4 轮验证样本，74 道 ≥ 0.3）。
+// 区分作用强的题数和脚本 dist 算出来的一致（只传 GPT 样本：100 道 ≥ 0.3）。
 func TestSeparatingPromptsMatchesScript(t *testing.T) {
-	if n := len(SeparatingPrompts(0.3, "gpt")); n != 74 {
-		t.Errorf("区分作用 ≥ 0.3 的题 = %d，脚本是 74", n)
+	if n := len(SeparatingPrompts(0.3, "gpt")); n != 100 {
+		t.Errorf("区分作用 ≥ 0.3 的题 = %d，脚本是 100", n)
 	}
 }
 
