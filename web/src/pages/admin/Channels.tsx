@@ -759,18 +759,20 @@ export default function Channels() {
           <Typography.Paragraph type="secondary">
             {t('需要时才加：客户端请求站内模型，发给上游的是左边的名字', 'Map only when needed: clients request the site model, and the name on the left goes upstream')}
           </Typography.Paragraph>
-          <Space style={{ marginBottom: 12 }}>
+          <Space style={{ display: 'flex', marginBottom: rows.length > 0 ? 12 : 0 }}>
             <Button icon={<PlusOutlined />} onClick={() => {
               const row = { key: rowSeq++, upstream: '' }
               setRows((old) => [...old, row])
             }}>
               {t('添加映射', 'Add mapping')}
             </Button>
-            <Button disabled={unresolved.length === 0} onClick={autoMap}>
-              {t('自动映射', 'Auto map')}
-            </Button>
+            {unresolved.length > 0 && (
+              <Button onClick={autoMap}>
+                {t('自动映射', 'Auto map')}
+              </Button>
+            )}
           </Space>
-          {rows.length > 0 ? (
+          {rows.length > 0 && (
             <Table
               size="small"
               rowKey="key"
@@ -811,8 +813,6 @@ export default function Channels() {
                 },
               ]}
             />
-          ) : (
-            <Typography.Text type="secondary">{t('没有映射，接入的模型按原名请求', 'No mappings. Connected models use their original names')}</Typography.Text>
           )}
         </section>
       </Drawer>
