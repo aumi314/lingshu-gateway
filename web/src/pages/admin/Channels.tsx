@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  Alert,
   App,
   Button,
   Checkbox,
@@ -65,7 +64,9 @@ export default function Channels() {
   const [models, setModels] = useState<Model[]>([])
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState<Channel | 'new' | null>(null)
+  const [connectedModels, setConnectedModels] = useState<string[]>([])
   const [rows, setRows] = useState<Row[]>([])
+  const [manualModel, setManualModel] = useState<string | null>(null)
   const [keyRows, setKeyRows] = useState<KeyRow[]>([])
   const [probeKeyID, setProbeKeyID] = useState<number | undefined>()
   const [fetched, setFetched] = useState<string[] | null>(null)
@@ -107,27 +108,27 @@ export default function Channels() {
   }, [load])
 
   const modelByID = useMemo(() => new Map(models.map((m) => [m.id, m])), [models])
+  const modelByName = useMemo(() => new Map(models.map((m) => [m.name.trim(), m])), [models])
   const groupByID = useMemo(() => new Map(groups.map((g) => [g.id, g])), [groups])
+  const missingUpstreamModels = fetched ? connectedModels.filter((name) => !fetched.includes(name)) : []
 
-  // 完整名优先，其次去掉一层厂商前缀，最后兼容数字版本分隔符；只自动选择唯一候选。
-  const matchModel = (upstream: string) => {
-    const name = upstream.trim().toLowerCase()
-    if (!name) return undefined
-    const exact = models.filter((m) => m.name.trim().toLowerCase() === name)
-    if (exact.length) return exact.length === 1 ? exact[0].id : undefined
-    const bare = name.replace(/^[^/]+\//, '')
-    const same = models.filter((m) => m.name.trim().toLowerCase() === bare)
-    if (same.length) return same.length === 1 ? same[0].id : undefined
-    const version = (value: string) => value.replace(/(\d)\.(?=\d)/g, '$1-')
-    const candidates = models.filter((m) => version(m.name.trim().toLowerCase()) === version(bare))
-    return candidates.length === 1 ? candidates[0].id : undefined
+  const addModels = (names: string[]) => {
+    const trimmed = names.map((name) => name.trim()).filter(Boolean)
+    setConnectedModels((old) => [...new Set([...old, ...trimmed])])
   }
 
-  const addRows = (names: string[]) => {
-    setRows((old) => {
-      const have = new Set(old.map((r) => r.upstream))
-      return [...old, ...names.filter((n) => n && !have.has(n)).map((n) => ({ key: rowSeq++, upstream: n, model_id: matchModel(n) }))]
-    })
+  const addManualModel = () => {
+    if (!manualModel?.trim()) return
+    addModels([manualModel])
+    setManualModel(null)
+  }
+
+  // 站内没有同名模型、也没有有效映射的接入模型，标红并挡住保存
+  const unresolved = connectedModels.filter((name) => !modelByName.has(name) && !rows.some((row) => row.upstream === name && row.model_id !== undefined && modelByID.has(row.model_id)))
+
+  const removeModel = (name: string) => {
+    setConnectedModels((old) => old.filter((item) => item !== name))
+    setRows((old) => old.filter((row) => row.upstream !== name))
   }
 
   const openNew = () => {
@@ -139,7 +140,9 @@ export default function Channels() {
       enabled: true,
       group_ids: groups.filter((g) => g.name === 'default' && g.enabled).map((g) => g.id),
     })
+    setConnectedModels([])
     setRows([])
+    setManualModel(null)
     setKeyRows([])
     setEditing('new')
   }
@@ -148,13 +151,17 @@ export default function Channels() {
     form.resetFields()
     form.setFieldsValue({ ...c, root_url: usesRootURL(c.template) ? c.base_url_messages : '' })
     setKeyRows(toRows(c.keys))
-    setRows(c.models.map((m) => ({ key: rowSeq++, upstream: m.upstream_name || m.model_name, model_id: m.model_id })))
+    const channelModels = c.models.map((m) => ({ ...m, upstream: (m.upstream_name || m.model_name).trim() }))
+    setConnectedModels([...new Set(channelModels.map((m) => m.upstream))])
+    setRows(channelModels.filter((m) => m.upstream !== m.model_name.trim()).map((m) => ({ key: rowSeq++, upstream: m.upstream, model_id: m.model_id })))
+    setManualModel(null)
     setEditing(c)
   }
 
   const applyTemplate = (id: string) => {
     const tpl = templates.find((x) => x.id === id)
     if (!tpl) return
+    if (tpl.preset_models?.length) addModels(tpl.preset_models)
     const current = form.getFieldsValue(true)
     if (usesRootURL(id)) {
       const root = recoverStandardRoot(current)
@@ -181,7 +188,6 @@ export default function Channels() {
       base_url_systemone: tpl.base_url_systemone,
       proxy_url: tpl.proxy_url ?? '',
     })
-    if (tpl.preset_models?.length) addRows(tpl.preset_models)
   }
 
   // 拉取模型和冒烟测试用当前表单内容（可以是还没保存的渠道）
@@ -217,15 +223,36 @@ export default function Channels() {
     setFetching(true)
     try {
       const names = await post<string[]>('/api/admin/channels/fetch-models', d)
-      const have = new Set(rows.map((r) => r.upstream))
-      setPicked(names.filter((n) => have.has(n)))
+      setPicked(connectedModels)
       setModelSearch('')
-      setFetched(names)
+      setFetched([...new Set(names.map((name) => name.trim()).filter(Boolean))])
     } catch (e) {
       message.error((e as Error).message)
     } finally {
       setFetching(false)
     }
+  }
+
+  const confirmModels = () => {
+    const selected = new Set(picked)
+    setConnectedModels((old) => [...new Set([...old, ...(fetched ?? [])])].filter((name) => selected.has(name)))
+    setRows((old) => old.filter((row) => !row.upstream || selected.has(row.upstream)))
+    setFetched(null)
+  }
+
+  const renderModelChoices = (names: string[]) => {
+    const query = modelSearch.trim().toLowerCase()
+    return (
+      <div className="model-pick" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '6px 16px' }}>
+        {names.map((name) => (
+          <Checkbox key={name} value={name} style={{ display: name.toLowerCase().includes(query) ? undefined : 'none' }}>
+            <span className="mono" title={name} style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {name}
+            </span>
+          </Checkbox>
+        ))}
+      </div>
+    )
   }
 
   const openProbe = (d: ProbeDraft, upstreams: string[]) => {
@@ -279,16 +306,44 @@ export default function Channels() {
     const v = await form.validateFields()
     const d = draft()
     if (!d) return
-    const missing = rows.findIndex((r) => !r.upstream.trim() || !r.model_id)
-    if (missing >= 0) {
-      message.error(t(`第 ${missing + 1} 行模型没填完整：上游模型名和站内模型都要填`, `Row ${missing + 1} is incomplete`))
+    const connected = new Set(connectedModels)
+    const mappings = new Map<string, Model>()
+    for (const [index, row] of rows.entries()) {
+      if (!row.upstream) {
+        message.error(t(`第 ${index + 1} 条映射没选上游模型`, `Choose an upstream model for mapping ${index + 1}`))
+        return
+      }
+      if (!connected.has(row.upstream)) {
+        message.error(t(`映射里的 ${row.upstream} 还没接入，先在上面接入`, `Connect ${row.upstream} above before mapping it`))
+        return
+      }
+      const model = row.model_id === undefined ? undefined : modelByID.get(row.model_id)
+      if (!model) {
+        message.error(t(`映射里的 ${row.upstream} 没选站内模型`, `Choose a site model for ${row.upstream}`))
+        return
+      }
+      if (mappings.has(row.upstream)) {
+        message.error(t(`上游模型 ${row.upstream} 有重复映射`, `Upstream model ${row.upstream} has duplicate mappings`))
+        return
+      }
+      mappings.set(row.upstream, model)
+    }
+    const missing: string[] = []
+    const channelModels = connectedModels.flatMap((name) => {
+      const model = mappings.get(name) ?? modelByName.get(name)
+      if (model) return [{ model_id: model.id, model_name: model.name, upstream_name: name }]
+      missing.push(name)
+      return []
+    })
+    if (missing.length > 0) {
+      message.error(t(`这些模型站内没有：${missing.join('、')}。在下方加映射，或去「定价」页配置价格`, `These models are missing on this site: ${missing.join(', ')}. Add mappings below or set prices on the Pricing page`))
       return
     }
     if (!keyRows.length) {
       message.error(t('至少要有一把 API key', 'Add at least one API key'))
       return
     }
-    const ids = rows.map((r) => r.model_id)
+    const ids = channelModels.map((m) => m.model_id)
     if (new Set(ids).size !== ids.length) {
       message.error(t('同一个站内模型在这个渠道里只能映射一次', 'Each site model can only be mapped once per channel'))
       return
@@ -302,7 +357,7 @@ export default function Channels() {
       priority: v.priority,
       enabled: v.enabled,
       group_ids: v.group_ids,
-      models: rows.map((r) => ({ model_id: r.model_id, model_name: modelByID.get(r.model_id!)?.name, upstream_name: r.upstream.trim() })),
+      models: channelModels,
     }
     setSaving(true)
     try {
@@ -499,7 +554,7 @@ export default function Channels() {
           <Space>
             <Button onClick={() => {
               const d = draft()
-              if (d) openProbe(d, rows.map((r) => r.upstream))
+              if (d) openProbe(d, connectedModels)
               else void form.validateFields(['root_url']).catch(() => {})
             }}>
               {t('测试', 'Test')}
@@ -625,81 +680,127 @@ export default function Channels() {
           </Form.Item>
         </Form>
 
-        <Divider titlePlacement="start">{t('模型映射', 'Model mapping')}</Divider>
-        <Typography.Paragraph type="secondary">
-          {t('左边是上游的模型名，右边是对应的站内模型。会自动识别厂商前缀和版本号写法；有多个候选时请手动选择。', 'Upstream model name on the left, its site model on the right. Provider prefixes and version separators are matched automatically; choose manually when multiple models match.')}
-        </Typography.Paragraph>
-        <Space style={{ marginBottom: 12 }}>
-          <Button loading={fetching} onClick={fetchModels}>
-            {t('从上游拉取模型', 'Fetch from upstream')}
-          </Button>
-          <Button icon={<PlusOutlined />} onClick={() => setRows((r) => [...r, { key: rowSeq++, upstream: '' }])}>
-            {t('手动添加', 'Add manually')}
-          </Button>
-        </Space>
-        <Table
-          size="small"
-          rowKey="key"
-          pagination={false}
-          dataSource={rows}
-          locale={{ emptyText: t('还没有模型', 'No models yet') }}
-          columns={[
-            {
-              title: t('上游模型名', 'Upstream model'),
-              render: (_, r) => (
-                <Input
-                  size="small"
-                  className="mono"
-                  value={r.upstream}
-                  onChange={(e) => setRows((rs) => rs.map((x) => (x.key === r.key ? { ...x, upstream: e.target.value, model_id: x.model_id ?? matchModel(e.target.value) } : x)))}
-                />
-              ),
-            },
-            {
-              title: t('站内模型', 'Site model'),
-              render: (_, r) => (
-                <Select
-                  size="small"
-                  style={{ width: '100%' }}
-                  showSearch={{ optionFilterProp: 'label' }}
-                  placeholder={t('选择站内模型', 'Choose a site model')}
-                  value={r.model_id}
-                  status={r.model_id ? undefined : 'warning'}
-                  onChange={(v) => setRows((rs) => rs.map((x) => (x.key === r.key ? { ...x, model_id: v } : x)))}
-                  options={models.map((m) => ({ value: m.id, label: m.name }))}
-                />
-              ),
-            },
-            {
-              width: 40,
-              render: (_, r) => <Button size="small" type="text" icon={<DeleteOutlined />} onClick={() => setRows((rs) => rs.filter((x) => x.key !== r.key))} />,
-            },
-          ]}
-        />
-        {rows.some((r) => r.upstream && !r.model_id) && (
-          <Alert
-            style={{ marginTop: 12 }}
-            type="warning"
-            showIcon
-            title={t('有模型还没选站内模型。站内还没有的模型，先到「模型」页添加并定好价格。', 'Some rows have no site model. Add missing models with prices on the Models page first.')}
-          />
-        )}
+        <section data-testid="connected-models">
+          <Divider titlePlacement="start">{t(`接入的模型（${connectedModels.length}）`, `Connected models (${connectedModels.length})`)}</Divider>
+          <Space style={{ marginBottom: 12 }}>
+            <Button loading={fetching} onClick={fetchModels}>
+              {t('从上游拉取模型', 'Fetch from upstream')}
+            </Button>
+            <Button icon={<PlusOutlined />} onClick={() => setManualModel('')}>
+              {t('手动添加', 'Add manually')}
+            </Button>
+          </Space>
+          {manualModel !== null && (
+            <Space.Compact style={{ display: 'flex', marginBottom: 12 }}>
+              <Input
+                autoFocus
+                placeholder={t('输入上游模型名', 'Enter an upstream model name')}
+                value={manualModel}
+                onChange={(e) => setManualModel(e.target.value)}
+                onPressEnter={addManualModel}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    e.stopPropagation()
+                    setManualModel(null)
+                  }
+                }}
+              />
+              <Button disabled={!manualModel.trim()} onClick={addManualModel}>{t('添加', 'Add')}</Button>
+            </Space.Compact>
+          )}
+          {connectedModels.length > 0 ? (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {connectedModels.map((name) => (
+                <Tag
+                  key={name}
+                  closable
+                  color={unresolved.includes(name) ? 'red' : undefined}
+                  style={{ margin: 0, maxWidth: '100%', overflowWrap: 'anywhere', whiteSpace: 'normal' }}
+                  onClose={(e) => {
+                    e.preventDefault()
+                    removeModel(name)
+                  }}
+                >
+                  <span className="mono">{name}</span>
+                </Tag>
+              ))}
+            </div>
+          ) : (
+            <Typography.Text type="secondary">{t('还没有接入模型，点「从上游拉取模型」勾选', 'No models connected. Fetch from upstream to select models')}</Typography.Text>
+          )}
+          {unresolved.length > 0 && (
+            <Typography.Paragraph type="danger" style={{ marginTop: 8, marginBottom: 0 }}>
+              {t(`红色的 ${unresolved.length} 个模型站内没有，保存不了：在下方加映射，或者去`, `${unresolved.length} red models are not on this site and block saving: add a mapping below, or set prices on `)}
+              <a href="/console/admin/pricing" target="_blank" rel="noreferrer">{t('「定价」页配置价格', 'the Pricing page')}</a>
+            </Typography.Paragraph>
+          )}
+        </section>
+
+        <section data-testid="model-mapping">
+          <Divider titlePlacement="start">{t('模型映射', 'Model mapping')}</Divider>
+          <Typography.Paragraph type="secondary">
+            {t('需要时才加：客户端请求站内模型，发给上游的是左边的名字', 'Map only when needed: clients request the site model, and the name on the left goes upstream')}
+          </Typography.Paragraph>
+          <div style={{ marginBottom: 12 }}>
+            <Button icon={<PlusOutlined />} onClick={() => {
+              const row = { key: rowSeq++, upstream: '' }
+              setRows((old) => [...old, row])
+            }}>
+              {t('添加映射', 'Add mapping')}
+            </Button>
+          </div>
+          {rows.length > 0 ? (
+            <Table
+              size="small"
+              rowKey="key"
+              pagination={false}
+              dataSource={rows}
+              columns={[
+                {
+                  title: t('上游模型名', 'Upstream model'),
+                  render: (_, r) => (
+                    <Select
+                      size="small"
+                      style={{ width: '100%' }}
+                      showSearch={{ optionFilterProp: 'label' }}
+                      placeholder={t('选择已接入模型', 'Choose a connected model')}
+                      value={r.upstream || undefined}
+                      onChange={(v) => setRows((rs) => rs.map((x) => (x.key === r.key ? { ...x, upstream: v } : x)))}
+                      options={connectedModels.map((name) => ({ value: name, label: name }))}
+                    />
+                  ),
+                },
+                {
+                  title: t('站内模型', 'Site model'),
+                  render: (_, r) => (
+                    <Select
+                      size="small"
+                      style={{ width: '100%' }}
+                      showSearch={{ optionFilterProp: 'label' }}
+                      placeholder={t('选择站内模型', 'Choose a site model')}
+                      value={r.model_id}
+                      onChange={(v) => setRows((rs) => rs.map((x) => (x.key === r.key ? { ...x, model_id: v } : x)))}
+                      options={models.map((m) => ({ value: m.id, label: m.name }))}
+                    />
+                  ),
+                },
+                {
+                  width: 40,
+                  render: (_, r) => <Button size="small" type="text" aria-label={t('删除映射', 'Delete mapping')} icon={<DeleteOutlined />} onClick={() => setRows((rs) => rs.filter((x) => x.key !== r.key))} />,
+                },
+              ]}
+            />
+          ) : (
+            <Typography.Text type="secondary">{t('没有映射，接入的模型按原名请求', 'No mappings. Connected models use their original names')}</Typography.Text>
+          )}
+        </section>
       </Drawer>
 
       <Modal
         open={fetched !== null}
         title={t(`上游有 ${fetched?.length ?? 0} 个模型，勾选要接入的`, `${fetched?.length ?? 0} upstream models — select the ones to connect`)}
         onCancel={() => setFetched(null)}
-        onOk={() => {
-          const available = new Set(fetched)
-          const selected = new Set(picked)
-          setRows((old) => {
-            const kept = old.filter((r) => !available.has(r.upstream) || selected.has(r.upstream))
-            const have = new Set(kept.map((r) => r.upstream))
-            return [...kept, ...picked.filter((n) => !have.has(n)).map((n) => ({ key: rowSeq++, upstream: n, model_id: matchModel(n) }))]
-          })
-          setFetched(null)
-        }}
+        onOk={confirmModels}
         okText={t('确定', 'Confirm')}
         width={820}
       >
@@ -752,22 +853,17 @@ export default function Channels() {
           style={{ marginBottom: 12 }}
         />
         <Checkbox.Group
-          className="model-pick"
           value={picked}
           onChange={(v) => setPicked(v as string[])}
-          style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '6px 16px', maxHeight: 460, overflowY: 'auto', overflowX: 'hidden', alignContent: 'start' }}
+          style={{ display: 'block', maxHeight: 460, overflowY: 'auto', overflowX: 'hidden' }}
         >
-          {fetched
-            ?.map((n) => (
-              <Checkbox key={n} value={n} style={{ minWidth: 0, display: !modelSearch.trim() || n.toLowerCase().includes(modelSearch.trim().toLowerCase()) ? undefined : 'none' }}>
-                <span style={{ display: 'flex', alignItems: 'center', minWidth: 0 }}>
-                  <span className="mono" title={n} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {n}
-                  </span>
-                  {matchModel(n) && <Tag color="green" style={{ marginLeft: 6, flex: 'none' }}>{t('站内已有', 'on site')}</Tag>}
-                </span>
-              </Checkbox>
-            ))}
+          {fetched && renderModelChoices(fetched)}
+          {missingUpstreamModels.length > 0 && (
+            <section data-testid="missing-upstream-models">
+              <Divider titlePlacement="start">{t('上游不存在', 'Missing upstream')}</Divider>
+              {renderModelChoices(missingUpstreamModels)}
+            </section>
+          )}
         </Checkbox.Group>
       </Modal>
 

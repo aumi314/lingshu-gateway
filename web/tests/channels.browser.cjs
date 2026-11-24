@@ -22,7 +22,12 @@ const path = require('node:path')
         { id: 11, masked: 'sk-a…aaaa', enabled: true, note: '主号', status: { state: 'ok' }, stats: { success: 12, failed: 0 } },
         { id: 12, masked: 'sk-b…bbbb', enabled: true, note: '', status: { state: 'cooling', until: '2026-11-07T12:00:00Z', reason: 'HTTP 429 rate limited' }, stats: { success: 3, failed: 2 } },
         { id: 13, masked: 'sk-c…cccc', enabled: true, note: '', status: { state: 'invalid', until: '2026-11-07T12:30:00Z', reason: 'HTTP 401 invalid key' } },
-      ], stats: { ...stat, success: 97, failed: 3, first_token_ms: 2350, tokens_per_sec: 45, cache_read_tokens: 870, input_tokens: 1000, last_success_at: '2026-11-06T07:00:00Z', last_failure_at: '2026-11-06T06:00:00Z' } },
+      ], stats: { ...stat, success: 97, failed: 3, first_token_ms: 2350, tokens_per_sec: 45, cache_read_tokens: 870, input_tokens: 1000, last_success_at: '2026-11-06T07:00:00Z', last_failure_at: '2026-11-06T06:00:00Z' },
+        models: [
+          { model_id: 1, model_name: 'gpt-6-sol', upstream_name: '' },
+          { model_id: 2, model_name: 'gpt-6.1-terra', upstream_name: 'openai/gpt-6.1-terra' },
+          { model_id: 4, model_name: 'foo-1.2-3', upstream_name: 'manual/legacy' },
+        ] },
       // 199 / 200 也只显示 99%，不四舍五入成 100%
       { ...base, id: 2, name: 'almost', stats: { ...stat, success: 199, failed: 1 } },
       { ...base, id: 3, name: 'broken', cooling: true, stats: { ...stat, success: 1, failed: 9 } },
@@ -37,8 +42,18 @@ const path = require('node:path')
       { id: 5, name: 'foo-1-2.3', input_price: '1', output_price: '2', cache_read_price: '0', cache_write_price: '0', price_rules: [], fast_multiplier: null },
       { id: 6, name: 'provider/gpt-6-sol', input_price: '1', output_price: '2', cache_read_price: '0', cache_write_price: '0', price_rules: [], fast_multiplier: null },
     ]
+    const fetchedModels = ['openai/gpt-6.1-terra', 'anthropic/claude-fable-5.2', 'provider/unknown']
+    const orphanedUpstream = 'orphaned-upstream'
     let saved = null
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } })
+    await page.route(/\/src\/pages\/admin\/Channels\.tsx(?:\?|$)/, async (route) => {
+      const response = await route.fetch()
+      const source = await response.text()
+      const options = /connectedModels\.map\(\(name\) => \(\{\s*value: name,\s*label: name\s*\}\)\)/g
+      const withOrphanedOption = source.replace(options, `$&.concat({ value: '${orphanedUpstream}', label: '${orphanedUpstream}' })`)
+      assert.notEqual(withOrphanedOption, source)
+      return route.fulfill({ response, body: withOrphanedOption })
+    })
     await page.route('**/api/**', (route) => {
       const p = new URL(route.request().url()).pathname
       const json = (b) => route.fulfill({ json: b })
@@ -47,7 +62,7 @@ const path = require('node:path')
       if (p === '/api/admin/channels') return json(channels)
       if (p === '/api/admin/groups') return json([{ id: 1, name: 'default', ratio: '1', enabled: true, is_public: true, user_group_ids: [], description: '' }])
       if (p === '/api/admin/models') return json(siteModels)
-      if (p === '/api/admin/channels/fetch-models') return json(['openai/gpt-6.1-terra', 'anthropic/claude-fable-5.2', 'provider/unknown'])
+      if (p === '/api/admin/channels/fetch-models') return json(fetchedModels)
       return json([])
     })
     await page.goto('http://127.0.0.1:25190/console/admin/channels')
@@ -84,88 +99,121 @@ const path = require('node:path')
     await drawer.getByText(/^冷却中（到 /).waitFor()
     await drawer.getByText(/^失效（/).waitFor()
     await drawer.getByText('12 / 0').waitFor()
-    // 自动匹配厂商前缀与版本号；完整名优先，歧义和不同型号不猜。
-    const mappingRows = () => drawer.locator('.ant-table-tbody').last().locator('tr')
-    const addMapping = async (name) => {
-      await drawer.getByRole('button', { name: /手动添加/ }).click()
-      const r = mappingRows().last()
-      await r.locator('input.mono').fill(name)
-      return r
+    // 接入模型按原名和映射反推，不再猜测厂商前缀/版本号，也不显示“站内已有”。
+    const connected = drawer.getByTestId('connected-models')
+    const modelNames = () => connected.locator('.ant-tag .mono').evaluateAll((spans) => spans.map((span) => span.textContent.trim()))
+    const mappingSection = drawer.getByTestId('model-mapping')
+    const mappingRows = () => mappingSection.locator('.ant-table-tbody').last().locator('tr')
+    const addManualModel = async (name) => {
+      await connected.getByRole('button', { name: /手动添加/ }).click()
+      const input = connected.getByRole('textbox')
+      await input.fill(name)
+      await input.press('Enter')
     }
-    for (const [upstream, site] of [
-      [' OPENAI/GPT-6.1-TERRA ', 'gpt-6.1-terra'],
-      ['anthropic/claude-fable-5.2', 'claude-fable-5-2'],
-      ['provider/gpt-6-sol', 'provider/gpt-6-sol'],
-      ['provider/foo-1.2-3', 'foo-1.2-3'],
-    ]) {
-      const r = await addMapping(upstream)
-      await r.locator('.ant-select').getByText(site, { exact: true }).waitFor()
-      await r.getByRole('button').click()
+    const chooseMapping = async (row, index, name) => {
+      await row.getByRole('combobox').nth(index).click()
+      await page.locator('.ant-select-dropdown:visible').locator('.ant-select-item-option-content').getByText(name, { exact: true }).click()
     }
-    for (const upstream of ['provider/foo-1.2.3', 'openai/gpt-6.1-terra-mini', 'openai/gpt61terra']) {
-      const r = await addMapping(upstream)
-      await r.getByText('选择站内模型', { exact: true }).waitFor()
-      await r.getByRole('button').click()
+    const addMapping = async (upstream, site) => {
+      await mappingSection.getByRole('button', { name: /添加映射/ }).click()
+      const row = mappingRows().last()
+      await chooseMapping(row, 0, upstream)
+      await chooseMapping(row, 1, site)
+      return row
     }
-    // 手动选择优先，修改上游名不覆盖管理员指定的映射。
-    const manual = await addMapping('provider/unknown')
-    await manual.getByRole('combobox').click()
-    await page.locator('.ant-select-dropdown:visible').getByText('gpt-6-sol', { exact: true }).click()
-    await manual.locator('input.mono').fill('openai/gpt-6.1-terra')
-    await manual.locator('.ant-select').getByText('gpt-6-sol', { exact: true }).waitFor()
-    await manual.getByRole('button').click()
-    // 拉取列表中的“站内已有”和添加后的选择使用同一规则，顶部实时显示已选模型。
-    await drawer.getByRole('button', { name: '从上游拉取模型', exact: true }).click()
+    await connected.getByText('接入的模型（3）', { exact: true }).waitFor()
+    assert.deepEqual(await modelNames(), ['gpt-6-sol', 'openai/gpt-6.1-terra', 'manual/legacy'])
+    const mappedTag = connected.locator('.ant-tag').filter({ hasText: 'openai/gpt-6.1-terra' })
+    await mappedTag.waitFor()
+    assert.equal(await mappedTag.getAttribute('class').then((value) => value.includes('ant-tag-red')), false)
+    await mappingSection.getByText('需要时才加：客户端请求站内模型，发给上游的是左边的名字', { exact: true }).waitFor()
+    await mappingRows().filter({ hasText: 'gpt-6.1-terra' }).getByText('openai/gpt-6.1-terra', { exact: true }).waitFor()
+    await mappingRows().filter({ hasText: 'foo-1.2-3' }).getByText('manual/legacy', { exact: true }).waitFor()
+    assert.equal(await mappingRows().count(), 2)
+    assert.equal(await drawer.getByText('站内已有', { exact: true }).count(), 0)
+    // 手动添加：重复名字不重复加；站内无同名又没映射的标签是红色，补映射后恢复。
+    await connected.getByRole('button', { name: /手动添加/ }).click()
+    const addInput = connected.getByRole('textbox')
+    await addInput.fill('discarded/manual')
+    await addInput.press('Escape')
+    await addInput.waitFor({ state: 'hidden' })
+    assert.equal((await modelNames()).includes('discarded/manual'), false)
+    await addManualModel('  manual/legacy  ')
+    assert.deepEqual(await modelNames(), ['gpt-6-sol', 'openai/gpt-6.1-terra', 'manual/legacy'])
+    await addManualModel('provider/foo-1-2.3')
+    assert.deepEqual(await modelNames(), ['gpt-6-sol', 'openai/gpt-6.1-terra', 'manual/legacy', 'provider/foo-1-2.3'])
+    const warningTag = connected.locator('.ant-tag-red').filter({ hasText: 'provider/foo-1-2.3' })
+    await warningTag.waitFor()
+    await connected.getByText(/红色的 1 个模型站内没有/).waitFor()
+    assert.equal(await connected.getByRole('link', { name: '「定价」页配置价格' }).getAttribute('href'), '/console/admin/pricing')
+    await addMapping('provider/foo-1-2.3', 'foo-1-2.3')
+    await warningTag.waitFor({ state: 'hidden' })
+    // 拉取弹窗：已接入预勾选；“上游不存在”默认勾选，搜索隐藏的勾选保留，取消不改草稿。
+    await drawer.locator('button').filter({ hasText: '从上游拉取模型' }).click()
     const picker = page.getByRole('dialog').filter({ hasText: '上游有 3 个模型' })
     const pickedBox = picker.getByTestId('picked-models')
-    await pickedBox.getByText('将接入 0 个模型', { exact: true }).waitFor()
-    await pickedBox.getByText('未选择模型', { exact: true }).waitFor()
-    for (const name of ['openai/gpt-6.1-terra', 'anthropic/claude-fable-5.2']) {
-      const choice = picker.locator('label').filter({ hasText: name })
-      await choice.getByText('站内已有', { exact: true }).waitFor()
-      await choice.click()
-      await pickedBox.getByText(name, { exact: true }).waitFor()
-    }
-    await pickedBox.getByText('将接入 2 个模型', { exact: true }).waitFor()
-    assert.equal(await picker.locator('label').filter({ hasText: 'provider/unknown' }).getByText('站内已有', { exact: true }).count(), 0)
-    await picker.getByRole('button', { name: /确\s*定/ }).click()
-    await mappingRows().filter({ has: page.locator('input.mono[value="openai/gpt-6.1-terra"]') }).locator('.ant-select').getByText('gpt-6.1-terra', { exact: true }).waitFor()
-    await mappingRows().filter({ has: page.locator('input.mono[value="anthropic/claude-fable-5.2"]') }).locator('.ant-select').getByText('claude-fable-5-2', { exact: true }).waitFor()
-    const upstreamNames = () => mappingRows().locator('input.mono').evaluateAll((inputs) => inputs.map((input) => input.value))
-    const openPicker = async () => {
-      await picker.waitFor({ state: 'hidden' })
-      await drawer.locator('button').filter({ hasText: '从上游拉取模型' }).click()
-    }
-    // 打开时预勾选已有映射并实时显示；取消弹窗不改草稿，确认取消勾选才移除；未拉取到的原有配置保留。
-    await openPicker()
-    await pickedBox.getByText('将接入 2 个模型', { exact: true }).waitFor()
-    await pickedBox.getByText('openai/gpt-6.1-terra', { exact: true }).waitFor()
-    await pickedBox.getByText('anthropic/claude-fable-5.2', { exact: true }).waitFor()
-    await picker.getByRole('checkbox', { name: /openai\/gpt-6.1-terra/ }).uncheck()
-    await pickedBox.getByText('将接入 1 个模型', { exact: true }).waitFor()
-    assert.equal(await pickedBox.getByText('openai/gpt-6.1-terra', { exact: true }).count(), 0)
-    await picker.getByRole('button', { name: /取\s*消/ }).click()
-    assert.deepEqual(await upstreamNames(), ['gpt-6-sol', 'openai/gpt-6.1-terra', 'anthropic/claude-fable-5.2'])
-    // 点已选标签上的关闭按钮也能取消勾选。
-    await openPicker()
-    await pickedBox.locator('.ant-tag').filter({ hasText: 'openai/gpt-6.1-terra' }).locator('.ant-tag-close-icon').click()
-    await pickedBox.getByText('将接入 1 个模型', { exact: true }).waitFor()
-    assert.equal(await picker.getByRole('checkbox', { name: /openai\/gpt-6.1-terra/ }).isChecked(), false)
-    await picker.getByRole('button', { name: /确\s*定/ }).click()
-    assert.deepEqual(await upstreamNames(), ['gpt-6-sol', 'anthropic/claude-fable-5.2'])
-    // 点“清空”后确认，会移除本次拉取到的全部映射；不会误删列表外的手动配置。
-    await openPicker()
-    await pickedBox.getByRole('button', { name: '清空', exact: true }).click()
-    await pickedBox.getByText('将接入 0 个模型', { exact: true }).waitFor()
-    await picker.getByRole('button', { name: /确\s*定/ }).click()
-    assert.deepEqual(await upstreamNames(), ['gpt-6-sol'])
-    // 搜索隐藏的勾选继续保留，新勾选模型仍自动匹配。
-    await openPicker()
-    await picker.getByRole('checkbox', { name: /openai\/gpt-6.1-terra/ }).check()
+    await pickedBox.getByText('将接入 4 个模型', { exact: true }).waitFor()
+    assert.equal(await picker.getByRole('checkbox', { name: /openai\/gpt-6.1-terra/ }).isChecked(), true)
+    assert.equal(await picker.getByRole('checkbox', { name: /anthropic\/claude-fable-5.2/ }).isChecked(), false)
+    assert.equal(await picker.getByRole('checkbox', { name: /provider\/unknown/ }).isChecked(), false)
+    const missing = picker.getByTestId('missing-upstream-models')
+    await missing.getByText('上游不存在', { exact: true }).waitFor()
+    for (const name of ['gpt-6-sol', 'manual/legacy', 'provider/foo-1-2.3']) await missing.getByText(name, { exact: false }).waitFor()
+    assert.equal(await missing.locator('input[type="checkbox"]:checked').count(), 3)
+    assert.equal(await picker.getByText('站内已有', { exact: true }).count(), 0)
+    await missing.getByRole('checkbox', { name: /manual\/legacy/ }).uncheck()
+    await pickedBox.getByText('将接入 3 个模型', { exact: true }).waitFor()
     await picker.getByRole('searchbox').fill('anthropic')
+    assert.equal(await picker.getByRole('checkbox', { name: /openai\/gpt-6.1-terra/ }).isVisible(), false)
+    assert.equal(await missing.getByRole('checkbox', { name: 'gpt-6-sol', exact: true }).isVisible(), false)
     await picker.getByRole('checkbox', { name: /anthropic\/claude-fable-5.2/ }).check()
+    await picker.getByRole('searchbox').fill('')
     await picker.getByRole('button', { name: /确\s*定/ }).click()
-    assert.deepEqual(await upstreamNames(), ['gpt-6-sol', 'openai/gpt-6.1-terra', 'anthropic/claude-fable-5.2'])
+    assert.deepEqual(await modelNames(), ['gpt-6-sol', 'openai/gpt-6.1-terra', 'provider/foo-1-2.3', 'anthropic/claude-fable-5.2'])
+    assert.equal(await mappingRows().count(), 2)
+    assert.equal(await mappingSection.getByText('manual/legacy', { exact: true }).count(), 0)
+    await picker.waitFor({ state: 'hidden' })
+    await drawer.locator('button').filter({ hasText: '从上游拉取模型' }).click()
+    await picker.getByRole('checkbox', { name: /openai\/gpt-6.1-terra/ }).uncheck()
+    await picker.getByRole('checkbox', { name: /provider\/unknown/ }).check()
+    await picker.getByRole('button', { name: /取\s*消/ }).click()
+    assert.deepEqual(await modelNames(), ['gpt-6-sol', 'openai/gpt-6.1-terra', 'provider/foo-1-2.3', 'anthropic/claude-fable-5.2'])
+    assert.equal(await mappingRows().count(), 2)
+    // 点叉和“清空”都只影响勾选；确认后接入与映射一起移除，空态文案出现。
+    await drawer.locator('button').filter({ hasText: '从上游拉取模型' }).click()
+    await pickedBox.locator('.ant-tag').filter({ hasText: 'anthropic/claude-fable-5.2' }).locator('.ant-tag-close-icon').click()
+    await pickedBox.getByText('将接入 3 个模型', { exact: true }).waitFor()
+    await picker.getByRole('button', { name: '清空', exact: true }).click()
+    await pickedBox.getByText('将接入 0 个模型', { exact: true }).waitFor()
+    await picker.getByRole('button', { name: /确\s*定/ }).click()
+    await connected.getByText('还没有接入模型，点「从上游拉取模型」勾选', { exact: true }).waitFor()
+    await mappingSection.getByText('没有映射，接入的模型按原名请求', { exact: true }).waitFor()
+    assert.equal(await mappingRows().count(), 0)
+    await addManualModel('gpt-6-sol')
+    await addManualModel('manual/legacy')
+    await drawer.locator('button').filter({ hasText: '从上游拉取模型' }).click()
+    await picker.getByRole('checkbox', { name: 'provider/unknown', exact: true }).check()
+    await picker.getByRole('checkbox', { name: 'anthropic/claude-fable-5.2', exact: true }).check()
+    await picker.getByRole('button', { name: /确\s*定/ }).click()
+    assert.deepEqual(await modelNames(), ['gpt-6-sol', 'manual/legacy', 'anthropic/claude-fable-5.2', 'provider/unknown'])
+    await addMapping('manual/legacy', 'foo-1.2-3')
+    await addMapping('anthropic/claude-fable-5.2', 'claude-fable-5-2')
+    const save = drawer.locator('.ant-drawer-extra').getByRole('button', { name: /保\s*存/ })
+    const expectSaveBlocked = async (message) => {
+      await save.click()
+      await page.getByText(message, { exact: true }).waitFor()
+      assert.equal(saved, null)
+    }
+    await mappingSection.getByRole('button', { name: /添加映射/ }).click()
+    const draftMapping = mappingRows().last()
+    await expectSaveBlocked('第 3 条映射没选上游模型')
+    await chooseMapping(draftMapping, 0, 'manual/legacy')
+    await expectSaveBlocked('映射里的 manual/legacy 没选站内模型')
+    await chooseMapping(draftMapping, 1, 'gpt-6.1-terra')
+    await expectSaveBlocked('上游模型 manual/legacy 有重复映射')
+    await chooseMapping(draftMapping, 0, orphanedUpstream)
+    await expectSaveBlocked(`映射里的 ${orphanedUpstream} 还没接入，先在上面接入`)
+    await draftMapping.getByRole('button', { name: '删除映射' }).click()
     // 追加：粘贴里的重复当场去掉并提示
     await drawer.getByRole('button', { name: /添加 key/ }).click()
     const dlg = page.getByRole('dialog').filter({ hasText: '追加' })
@@ -182,16 +230,20 @@ const path = require('node:path')
     await drawer.getByText('sk-o…5678', { exact: true }).waitFor()
     await drawer.getByText('sk-a…-123', { exact: true }).waitFor()
     for (const old of ['sk-a…aaaa', 'sk-b…bbbb', 'sk-c…cccc', 'sk-n…5678']) assert.equal(await drawer.getByText(old, { exact: true }).count(), 0)
+    // 无同名的接入模型会先拦截；补上映射后保存，payload 按接入模型逐行写出。
+    await expectSaveBlocked('这些模型站内没有：provider/unknown。在下方加映射，或去「定价」页配置价格')
+    await addMapping('provider/unknown', 'gpt-6.1-terra')
     // 保存：新 key 带完整内容；服务端去掉的重复数提示出来
-    await drawer.locator('.ant-drawer-extra').getByRole('button', { name: /保\s*存/ }).click()
+    await save.click()
     for (let i = 0; i < 100 && !saved; i++) await page.waitForTimeout(30)
     assert.deepEqual(saved.keys, [{ api_key: 'sk-only-one-12345678', enabled: true, note: '' }, { api_key: 'sk-a-same-as-old-123', enabled: true, note: '' }])
     assert.equal(saved.note, '质量好，0.15 倍')
     assert.equal(saved.api_key, undefined)
-    assert.deepEqual(saved.models.map(({ model_id, upstream_name }) => ({ model_id, upstream_name })), [
-      { model_id: 1, upstream_name: 'gpt-6-sol' },
-      { model_id: 2, upstream_name: 'openai/gpt-6.1-terra' },
-      { model_id: 3, upstream_name: 'anthropic/claude-fable-5.2' },
+    assert.deepEqual(saved.models, [
+      { model_id: 1, model_name: 'gpt-6-sol', upstream_name: 'gpt-6-sol' },
+      { model_id: 4, model_name: 'foo-1.2-3', upstream_name: 'manual/legacy' },
+      { model_id: 3, model_name: 'claude-fable-5-2', upstream_name: 'anthropic/claude-fable-5.2' },
+      { model_id: 2, model_name: 'gpt-6.1-terra', upstream_name: 'provider/unknown' },
     ])
     await page.getByText('渠道已保存，自动去掉了 1 把重复的 key', { exact: true }).waitFor()
     // 行里的操作各自独立，不打开编辑：删除（取消确认）、启用开关、拖动把手、额度
@@ -217,7 +269,7 @@ const path = require('node:path')
     await page.waitForTimeout(400)
     assert.notDeepEqual(await order(), before)
     assert.equal(await drawerTitle.isVisible(), false)
-    console.log('PASS: channel note under the name, key count tag colored by key health, per-key status and 24h counts in the drawer, append dedups pasted keys, replace keeps only pasted keys, save payload carries new keys only in full, server dedup count shown; channel list shows connection status instead of models: success rate floors, colors, TTFT/speed/cache line, cooling tag, idle and no-model states, tooltip details')
+    console.log('PASS: channel note under the name, key count tag colored by key health, per-key status and 24h counts in the drawer, connected models and mappings reverse from saved rows, manual add dedups, missing upstream models default checked, picker cancel and clear behave, warning tags and orphan mapping block save, append dedups pasted keys, replace keeps only pasted keys, save payload carries new keys and model rows, server dedup count shown; channel list shows connection status instead of models: success rate floors, colors, TTFT/speed/cache line, cooling tag, idle and no-model states, tooltip details')
   } finally {
     await browser.close()
     server.kill()
