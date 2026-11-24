@@ -8,6 +8,8 @@ import UserGroupManager from '../../components/UserGroupManager'
 import { DragHandle, SortableBody, SortableRow } from '../../components/SortableRows'
 import { arrayMove } from '@dnd-kit/sortable'
 
+type DeleteImpact = { key_count: number; usernames: string[] }
+
 // 放在「定价」页的标签里（pages/admin/Pricing.tsx），不单独成页
 export default function Groups() {
   const { t } = useApp()
@@ -17,6 +19,8 @@ export default function Groups() {
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState<Group | 'new' | 'new-collection' | null>(null)
   const [managingUserGroups, setManagingUserGroups] = useState(false)
+  const [checkingDelete, setCheckingDelete] = useState<number | null>(null)
+  const [deleteImpact, setDeleteImpact] = useState<(DeleteImpact & { groupId: number }) | null>(null)
   const [form] = Form.useForm()
 
   const isCollection = editing === 'new-collection' || (typeof editing === 'object' && editing?.is_collection === true)
@@ -76,6 +80,26 @@ export default function Groups() {
       message.error((e as Error).message)
     }
   }
+
+  const previewDelete = async (groupId: number) => {
+    setCheckingDelete(groupId)
+    setDeleteImpact(null)
+    try {
+      const impact = await get<DeleteImpact>(`/api/admin/groups/${groupId}/delete-impact`)
+      setDeleteImpact({ ...impact, groupId })
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setCheckingDelete(null)
+    }
+  }
+
+  const deleteTitle = deleteImpact && deleteImpact.key_count > 0
+    ? t(
+      `有 ${deleteImpact.key_count} 把 API key 在用这个分组（用户 ${deleteImpact.usernames.join('、')}），删除后这些 key 暂时不能调用，用户在 API keys 页重新选分组后恢复。`,
+      `${deleteImpact.key_count} API key(s) use this group (${deleteImpact.usernames.join(', ')}). After deletion, users must choose a new group on the API keys page to use these keys again.`,
+    )
+    : t('确定删除这个服务分组？', 'Delete this service group?')
 
   return (
     <div>
@@ -139,8 +163,16 @@ export default function Groups() {
             align: 'right',
             render: (_, g) => (
               <Space>
-                <Popconfirm title={t('确定删除这个服务分组？', 'Delete this service group?')} onConfirm={() => remove(g)}>
-                  <Button size="small" type="link" danger>
+                <Popconfirm
+                  title={deleteTitle}
+                  open={deleteImpact?.groupId === g.id}
+                  onOpenChange={(open) => {
+                    if (open && checkingDelete === null) void previewDelete(g.id)
+                    if (!open) setDeleteImpact((impact) => impact?.groupId === g.id ? null : impact)
+                  }}
+                  onConfirm={() => remove(g)}
+                >
+                  <Button size="small" type="link" danger loading={checkingDelete === g.id} disabled={checkingDelete !== null && checkingDelete !== g.id}>
                     {t('删除', 'Delete')}
                   </Button>
                 </Popconfirm>

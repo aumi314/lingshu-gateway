@@ -496,6 +496,22 @@ func (s *Store) DeleteGroup(ctx context.Context, id int64) error {
 	})
 }
 
+type GroupDeleteImpact struct {
+	KeyCount  int64    `json:"key_count"`
+	Usernames []string `json:"usernames"`
+}
+
+func (s *Store) GroupDeleteImpact(ctx context.Context, id int64) (GroupDeleteImpact, error) {
+	var impact GroupDeleteImpact
+	err := s.Pool.QueryRow(ctx, `
+		SELECT count(k.id), COALESCE(array_agg(DISTINCT u.username ORDER BY u.username) FILTER (WHERE u.id IS NOT NULL), '{}')
+		FROM groups g
+		LEFT JOIN api_keys k ON k.group_id = g.id
+		LEFT JOIN users u ON u.id = k.user_id
+		WHERE g.id = $1 GROUP BY g.id`, id).Scan(&impact.KeyCount, &impact.Usernames)
+	return impact, translate(err)
+}
+
 // ---- 模型 ----
 
 type Model struct {

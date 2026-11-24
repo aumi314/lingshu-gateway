@@ -377,7 +377,7 @@ type APIKey struct {
 	ID         int64            `json:"id"`
 	Name       string           `json:"name"`
 	Prefix     string           `json:"prefix"`
-	GroupID    int64            `json:"group_id"`
+	GroupID    *int64           `json:"group_id"`
 	GroupName  string           `json:"group_name"`
 	QuotaLimit *decimal.Decimal `json:"quota_limit"`
 	QuotaUsed  decimal.Decimal  `json:"quota_used"`
@@ -392,9 +392,9 @@ type APIKey struct {
 
 func (s *Store) ListAPIKeys(ctx context.Context, userID int64) ([]APIKey, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT k.id, k.name, k.key_prefix, k.group_id, g.name, k.quota_limit::text, k.quota_used::text,
+		SELECT k.id, k.name, k.key_prefix, k.group_id, COALESCE(g.name, ''), k.quota_limit::text, k.quota_used::text,
 		       k.enabled, k.last_used_at, k.created_at, k.expires_at, COALESCE(p.id, 0), COALESCE(p.name, '')
-		FROM api_keys k JOIN groups g ON g.id = k.group_id LEFT JOIN projects p ON p.id = k.project_id
+		FROM api_keys k LEFT JOIN groups g ON g.id = k.group_id LEFT JOIN projects p ON p.id = k.project_id
 		WHERE k.user_id = $1 ORDER BY k.id DESC`, userID)
 	if err != nil {
 		return nil, err
