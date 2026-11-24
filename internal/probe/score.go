@@ -86,6 +86,9 @@ func SeparatingPrompts(minScore float64, family string) []string {
 	for _, q := range s.Fingerprint.Prompts {
 		var halves [][2][]string
 		for _, m := range models {
+			if bs[m].Rounds < 2 {
+				continue
+			}
 			a := bs[m].Answers[q]
 			if len(a) >= 6 {
 				halves = append(halves, [2][]string{a[:len(a)/2], a[len(a)/2:]})

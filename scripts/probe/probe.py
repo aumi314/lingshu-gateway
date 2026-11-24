@@ -166,17 +166,60 @@ def parallel(args, fn, jobs):
         return list(ex.map(fn, jobs))
 
 
+def resumable(args, section, jobs, fn, extra=None):
+    """逐个落盘、可以接着跑：每完成一个请求就写一次盘，结果按任务序号记在 runs 里（字段 job）；
+    重跑同一轮时跳过已经成功的任务，出错的重发。连续 10 次出错（多半是额度用完）就停，已完成的都在盘上。
+    extra 是这一节固定要记的内容（如题目），和 runs 一起写。"""
+    prev = args.previous.get(section) or {}
+    done = {r["job"]: r for r in prev.get("runs", []) if "job" in r and not r.get("error")}
+    todo = [j for j in range(len(jobs)) if j not in done]
+    if done:
+        print(f"{section} 接着上次跑：已完成 {len(done)} 个，还要 {len(todo)} 个", file=sys.stderr, flush=True)
+    lock = threading.Lock()
+    state = {"streak": 0, "stopped": False, "failed": 0}
+
+    def snapshot(partial):
+        return {**(extra or {}), "runs": [done[j] for j in sorted(done)], "partial": partial, "errors": state["failed"]}
+
+    def one(j):
+        if state["stopped"]:
+            return
+        r = fn(jobs[j])
+        r["job"] = j
+        with lock:
+            if r.get("error"):
+                state["failed"] += 1
+                state["streak"] += 1
+                if state["streak"] >= 10 and not state["stopped"]:
+                    state["stopped"] = True
+                    print(f"{section} 连续出错，停止（已完成的都在盘上，重跑同一轮会接着跑）：{str(r['error'])[:120]}", file=sys.stderr, flush=True)
+                return
+            state["streak"] = 0
+            done[j] = r
+            args.checkpoint(section, snapshot(True))
+    parallel(args, one, todo)
+    return snapshot(len(done) < len(jobs))
+
+
 # ---- 分词指纹：差值只取决于分词器，不受各家注入的系统提示词影响 ----
 
 def probe_tokens(args):
+    """一个一个发，每个请求的输入 token 数都立即落盘；重跑时只补还没拿到的。"""
     t = SUITE["tokens"]
-    base = [call(args, t["suffix"].strip()).get("prompt_tokens") for _ in range(2)]
-    anchor = call(args, t["suffix"]).get("prompt_tokens")
-    deltas = {}
-    for name, text in t["probes"].items():
-        r = call(args, text + t["suffix"])
-        deltas[name] = None if r.get("prompt_tokens") is None or anchor is None else r["prompt_tokens"] - anchor
-    return {"base": base, "anchor": anchor, "deltas": deltas}
+    jobs = [("base0", t["suffix"].strip()), ("base1", t["suffix"].strip()), ("anchor", t["suffix"])] + [(n, x + t["suffix"]) for n, x in t["probes"].items()]
+    got = dict((args.previous.get("tokens") or {}).get("raw", {}))
+
+    def summary(partial):
+        anchor = got.get("anchor")
+        base = [got[k] for k in ("base0", "base1") if got.get(k) is not None]
+        deltas = {n: (got[n] - anchor if got.get(n) is not None and anchor is not None else None) for n in t["probes"]}
+        return {"base": base, "anchor": anchor, "deltas": deltas, "raw": got, "partial": partial}
+    for name, text in jobs:
+        if got.get(name) is not None:
+            continue
+        got[name] = call(args, text).get("prompt_tokens")
+        args.checkpoint("tokens", summary(True))
+    return summary(any(got.get(n) is None for n, _ in jobs))
 
 
 # ---- 单词指纹：几十个“随机说一个”的问题，每题多次，答案分布就是指纹 ----
@@ -202,7 +245,7 @@ def probe_fingerprint(args):
         if args.fingerprint_limit:
             prompts = prompts[: args.fingerprint_limit]
     samples = args.fingerprint_samples or f["samples"]
-    # 边采边落盘、可以接着采：这一轮文件里已有的答案保留，每题只补到 samples 个；每 20 个答案写一次盘，中断（额度用完、被停掉）也不丢
+    # 边采边落盘、可以接着采：这一轮文件里已有的答案保留，每题只补到 samples 个；每个答案都写一次盘，中断（额度用完、被停掉）也不丢
     prev = fingerprint_answers(args.previous["fingerprint"]) if args.previous.get("fingerprint") else {}
     answers = {p: list(prev.get(p, []))[:samples] for p in prompts}
     jobs = [p for p in prompts for _ in range(samples - len(answers[p]))]
@@ -230,10 +273,9 @@ def probe_fingerprint(args):
             state["streak"] = 0
             answers[p].append(normalize(r.get("text", "")))
             state["new"] += 1
-            if state["new"] % 20 == 0:
-                args.checkpoint("fingerprint", result(True))
+            args.checkpoint("fingerprint", result(True))  # 每个答案都落盘
     parallel(args, one, jobs)
-    return result(state["stopped"])
+    return result(state["stopped"] or any(len(answers[p]) < samples for p in prompts))
 
 
 # ---- 数学题：按种子生成，本地算标准答案；记正确率和推理 token（思考深度、稳定性） ----
@@ -307,8 +349,7 @@ def probe_math(args):
         got = last_int(r.get("text", ""))
         return {"problem": i, "correct": got == a, "got": r.get("text", "")[-40:], "reasoning_tokens": r.get("reasoning_tokens"),
                 "seconds": r.get("seconds"), "error": r.get("error")}
-    return {"problems": [{"kind": k, "tier": t, "question": q, "answer": a} for k, t, q, a in problems],
-            "runs": parallel(args, one, jobs)}
+    return resumable(args, "math", jobs, one, {"problems": [{"kind": k, "tier": t, "question": q, "answer": a} for k, t, q, a in problems]})
 
 
 # ---- 大海捞针：长上下文里藏三个编号，看有没有被截断 ----
@@ -327,7 +368,7 @@ def probe_needle(args):
     q = " ".join(sentences) + "\n\nThe text above contains three secret codes (numbers 1, 2 and 3). List them in order, one per line, nothing else."
     r = call(args, q, effort=n["effort"])
     return {"prompt_tokens": r.get("prompt_tokens"), "found": sum(c in r.get("text", "") for c in codes),
-            "seconds": r.get("seconds"), "error": r.get("error")}
+            "seconds": r.get("seconds"), "error": r.get("error"), "partial": bool(r.get("error"))}
 
 
 # ---- 鹈鹕：生成 HTML，截图后交给可信的看图模型按检查表判定结构 ----
@@ -498,7 +539,7 @@ def probe_numbers(args):
         r = call(args, n["prompt"].format(count=count, max=n["max"]), effort=effort, max_tokens=8192)
         values = [int(x) for x in re.findall(r"\d+", r.get("text", "")) if 1 <= int(x) <= n["max"]]
         return {"count": count, "values": values, "reasoning_tokens": r.get("reasoning_tokens"), "error": r.get("error")}
-    return {"effort": effort, "runs": parallel(args, one, range(args.numbers_samples or n["samples"]))}
+    return resumable(args, "numbers", list(range(args.numbers_samples or n["samples"])), one, {"effort": effort})
 
 
 PROBES = {"tokens": probe_tokens, "fingerprint": probe_fingerprint, "math": probe_math, "needle": probe_needle, "pelican": probe_pelican,
@@ -518,18 +559,27 @@ def run(args):
 
     def checkpoint(section, partial):
         out[section] = partial
-        json.dump(out, open(path, "w"), ensure_ascii=False, indent=1)
+        save()
+
+    def save():  # 先写临时文件再改名：写到一半被停掉也不会留下损坏的样本文件
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, path)
     args.checkpoint = checkpoint
     if args.protocol == "messages":
         out["source"] = {"protocol": "messages", "base": args.base, "request_model": args.model, "provider": args.provider or None}
     for name in args.only.split(","):
+        if name in out and "finished_at" in out[name] and not out[name].get("partial") and not out[name].get("stopped") and not (name == "fingerprint" and (args.fingerprint_prompts or args.fingerprint_samples)):
+            print(f"[{args.model} 第 {args.round} 轮] {name} 已采完，跳过", file=sys.stderr, flush=True)
+            continue
         start = time.time()
         print(f"[{args.model} 第 {args.round} 轮] {name} …", file=sys.stderr, flush=True)
         result = PROBES[name](args)
         out[name] = result
         out[name]["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         out[name]["elapsed_seconds"] = round(time.time() - start, 1)
-        json.dump(out, open(path, "w"), ensure_ascii=False, indent=1)
+        save()
     print(path)
 
 

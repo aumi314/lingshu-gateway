@@ -65,6 +65,7 @@ type Baseline struct {
 	TokenBase   int                 // 分词指纹的基准输入 token（官方 Codex 环境，含 Codex 注入的提示词）
 	TokenDeltas map[string]int      // 分词指纹：探针文本带来的输入 token 差值
 	Math        map[string]MathBaseline
+	Rounds      int // 有单词指纹的样本轮数；不到两轮的型号不参与选题（单轮选题有“赢家诅咒”），但照常参与比对
 }
 
 // MathBaseline 是某类数学题在官方样本里的表现。
@@ -176,6 +177,7 @@ func load() error {
 			reasoning[model] = map[string][]int{}
 		}
 		if bf.Fingerprint != nil {
+			b.Rounds++
 			for q, ans := range bf.Fingerprint.Answers {
 				if n, err := strconv.Atoi(q); err == nil && n < len(v1) {
 					q = v1[n]
