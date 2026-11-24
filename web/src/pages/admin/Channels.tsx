@@ -708,26 +708,28 @@ export default function Channels() {
               <Button disabled={!manualModel.trim()} onClick={addManualModel}>{t('添加', 'Add')}</Button>
             </Space.Compact>
           )}
-          {connectedModels.length > 0 ? (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              {connectedModels.map((name) => (
-                <Tag
-                  key={name}
-                  closable
-                  color={unresolved.includes(name) ? 'red' : undefined}
-                  style={{ margin: 0, maxWidth: '100%', overflowWrap: 'anywhere', whiteSpace: 'normal' }}
-                  onClose={(e) => {
-                    e.preventDefault()
-                    removeModel(name)
-                  }}
-                >
-                  <span className="mono">{name}</span>
-                </Tag>
-              ))}
-            </div>
-          ) : (
-            <Typography.Text type="secondary">{t('还没有接入模型，点「从上游拉取模型」勾选', 'No models connected. Fetch from upstream to select models')}</Typography.Text>
-          )}
+          <div style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid rgba(128, 128, 128, 0.25)' }}>
+            {connectedModels.length > 0 ? (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {connectedModels.map((name) => (
+                  <Tag
+                    key={name}
+                    closable
+                    color={unresolved.includes(name) ? 'red' : undefined}
+                    style={{ margin: 0, maxWidth: '100%', overflowWrap: 'anywhere', whiteSpace: 'normal' }}
+                    onClose={(e) => {
+                      e.preventDefault()
+                      removeModel(name)
+                    }}
+                  >
+                    <span className="mono">{name}</span>
+                  </Tag>
+                ))}
+              </div>
+            ) : (
+              <Typography.Text type="secondary">{t('还没有接入模型，点「从上游拉取模型」勾选', 'No models connected. Fetch from upstream to select models')}</Typography.Text>
+            )}
+          </div>
           {unresolved.length > 0 && (
             <Typography.Paragraph type="danger" style={{ marginTop: 8, marginBottom: 0 }}>
               {t(`红色的 ${unresolved.length} 个模型站内没有，保存不了：在下方加映射，或者去`, `${unresolved.length} red models are not on this site and block saving: add a mapping below, or set prices on `)}
@@ -804,47 +806,6 @@ export default function Channels() {
         okText={t('确定', 'Confirm')}
         width={820}
       >
-        <div
-          data-testid="picked-models"
-          style={{
-            marginBottom: 12,
-            padding: '8px 10px',
-            borderRadius: 6,
-            border: '1px solid rgba(128, 128, 128, 0.2)',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              {t(`将接入 ${picked.length} 个模型`, `${picked.length} models selected`)}
-            </Typography.Text>
-            {picked.length > 0 && (
-              <Button type="link" size="small" style={{ padding: 0, height: 'auto' }} onClick={() => setPicked([])}>
-                {t('清空', 'Clear')}
-              </Button>
-            )}
-          </div>
-          {picked.length > 0 ? (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, maxHeight: 96, overflowY: 'auto' }}>
-              {picked.map((n) => (
-                <Tag
-                  key={n}
-                  closable
-                  style={{ margin: 0 }}
-                  onClose={(e) => {
-                    e.preventDefault()
-                    setPicked((prev) => prev.filter((item) => item !== n))
-                  }}
-                >
-                  <span className="mono">{n}</span>
-                </Tag>
-              ))}
-            </div>
-          ) : (
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              {t('未选择模型', 'No models selected')}
-            </Typography.Text>
-          )}
-        </div>
         <Input.Search
           allowClear
           placeholder={t('搜索模型名，例如 claude、gpt-6', 'Search, e.g. claude, gpt-6')}
