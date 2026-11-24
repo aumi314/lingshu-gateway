@@ -488,8 +488,8 @@ func TestProbeFingerprintGPT(t *testing.T) {
 		t.Fatalf("指纹测试结果不对: %+v", run)
 	}
 	requests := up.snapshot()
-	if len(requests) != 663 || len(run.Report.Calls) != 663 {
-		t.Fatalf("指纹请求数 = %d / %d, want 663", len(requests), len(run.Report.Calls))
+	if len(requests) != 693 || len(run.Report.Calls) != 693 {
+		t.Fatalf("指纹请求数 = %d / %d, want 693", len(requests), len(run.Report.Calls))
 	}
 	for _, item := range run.Report.Items {
 		if item.Key != "fingerprint" && item.Key != "pair" {
