@@ -389,6 +389,19 @@ func (s *Server) saveGroup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, g)
 }
 
+func (s *Server) groupDeleteImpact(w http.ResponseWriter, r *http.Request) {
+	id, okID := pathID(w, r)
+	if !okID {
+		return
+	}
+	impact, err := s.Store.GroupDeleteImpact(r.Context(), id)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, impact)
+}
+
 func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request) {
 	id, okID := pathID(w, r)
 	if !okID {

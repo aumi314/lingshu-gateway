@@ -377,6 +377,10 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, proto usa
 		writeError(w, proto, http.StatusUnauthorized, "API key 已过期，请在 API keys 页面延长有效期或创建新 key")
 		return nil, false
 	}
+	if owner.GroupID == 0 {
+		writeError(w, proto, http.StatusForbidden, "这把 key 的服务分组已被管理员删除，请到 API keys 页面重新选择一个分组")
+		return nil, false
+	}
 	return owner, true
 }
 

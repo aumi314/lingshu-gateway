@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Alert, App, Button, Card, DatePicker, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography } from 'antd'
 import { ExportOutlined, PlusOutlined } from '@ant-design/icons'
 import dayjs, { type Dayjs } from 'dayjs'
-import { del, get, patch, post, type APIKey, type Group, type PricedModel } from '../api'
+import { del, get, patch, post, type APIKey, type Group, type PricedModel, type Project } from '../api'
 import { useApp } from '../app'
 import { magpieImportURL } from '../guide'
 import { rowEditing } from '../rowEditing'
@@ -17,6 +17,7 @@ export default function Keys() {
   const [apiBaseURL, setAPIBaseURL] = useState('')
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState<APIKey | 'new' | null>(null)
+  const [project, setProject] = useState<Project | null>(null)
   const [created, setCreated] = useState('')
   // 打开编辑时记下原来的过期时间：原来就过期的 key 允许只改名字，不算新选的过期时间
   const [originalExpiry, setOriginalExpiry] = useState<Dayjs | null>(null)
@@ -43,6 +44,21 @@ export default function Keys() {
     load()
   }, [load])
 
+  const projectID = editing && editing !== 'new' ? editing.project_id : undefined
+  useEffect(() => {
+    if (!projectID) return
+    let active = true
+    get<{ project: Project }>(`/api/me/projects/${projectID}`).then(({ project }) => {
+      if (active) setProject(project)
+    }).catch((e) => {
+      if (active) message.error((e as Error).message)
+    })
+    return () => { active = false }
+  }, [projectID, message])
+
+  const projectGroups = project?.id === projectID ? project?.groups : undefined
+  const groupOptions = projectID ? projectGroups ?? [] : groups
+
   // 限额在界面上按当前货币输入，提交时换回 USD
   const toUSD = (v?: number | null) => (v == null ? null : String(currency === 'CNY' ? v / rate : v))
   const fromUSD = (v: string | null) => (v == null ? null : Number((Number(v) * (currency === 'CNY' ? rate : 1)).toFixed(4)))
@@ -54,7 +70,8 @@ export default function Keys() {
   }
   const openEdit = (k: APIKey) => {
     const expires = k.expires_at ? dayjs(k.expires_at) : null
-    form.setFieldsValue({ name: k.name, group_id: k.group_id, quota_limit: fromUSD(k.quota_limit), expires_at: expires })
+    setProject(null)
+    form.setFieldsValue({ name: k.name, group_id: k.group_id ?? undefined, quota_limit: fromUSD(k.quota_limit), expires_at: expires })
     setOriginalExpiry(expires)
     setEditing(k)
   }
@@ -138,7 +155,9 @@ export default function Keys() {
         columns={[
           { title: t('名称', 'Name'), dataIndex: 'name', render: (v, k) => <span>{v}{k.project_name && <Tag color="gold" style={{ marginLeft: 6 }}>{t('项目', 'Project')} · {k.project_name}</Tag>}</span> },
           { title: 'Key', dataIndex: 'prefix', render: (v) => <span className="mono">{v}…</span> },
-          { title: t('服务分组', 'Service group'), dataIndex: 'group_name', render: (v) => <Tag>{v}</Tag> },
+          { title: t('服务分组', 'Service group'), dataIndex: 'group_name', render: (name, k) => k.group_id === null
+            ? <Tag color="error">{t('分组已删除，请重新选择', 'Group deleted. Choose a new group.')}</Tag>
+            : <Tag>{name}</Tag> },
           {
             title: t('已用 / 限额', 'Used / limit'),
             render: (_, k) => (
@@ -195,11 +214,12 @@ export default function Keys() {
           <Form.Item name="name" label={t('名称', 'Name')} rules={[{ required: true, message: t('起个名字，方便区分用途', 'Give it a name') }]}>
             <Input placeholder={t('例如：笔记本 Claude Code', 'e.g. Laptop Claude Code')} maxLength={50} />
           </Form.Item>
-          <Form.Item name="group_id" label={t('服务分组', 'Service group')} rules={[{ required: true }]}>
+          <Form.Item name="group_id" label={t('服务分组', 'Service group')} rules={[{ required: true }]}
+            extra={projectGroups?.length === 0 && t('项目没有开放的分组，请联系项目负责人', 'Ask the project owner to open a service group.')}>
             <Select
-              options={groups.map((g) => ({
+              options={groupOptions.map((g) => ({
                 value: g.id,
-                label: `${g.name} · ${g.is_collection ? t('按模型自动选分组', 'routes by model') : `${t('倍率', 'ratio')} ${Number(g.ratio)}`}${g.description ? ' · ' + g.description : ''}`,
+                label: `${g.name} · ${g.is_collection ? t('按模型自动选分组', 'routes by model') : `${t('倍率', 'ratio')} ${Number(g.ratio)}`}${'description' in g && g.description ? ' · ' + g.description : ''}`,
               }))}
             />
           </Form.Item>

@@ -19,7 +19,7 @@ type KeyOwner struct {
 	KeyID        int64
 	KeyName      string
 	UserID       int64
-	GroupID      int64
+	GroupID      int64 // 分组被删除时为 0
 	GroupName    string
 	ExpiresAt    *time.Time
 	KeyEnabled   bool
@@ -49,19 +49,19 @@ func (s *Store) LookupKey(ctx context.Context, keyHash string) (*KeyOwner, error
 	var limit *string
 	// 分组权限：个人 Key 看用户自己能不能用；项目 Key 看项目开放了这个分组、且创建人现在仍能用（管理员收回创建人的权限后项目也跟着失效）
 	err := s.Pool.QueryRow(ctx, `
-		SELECT k.id, k.name, k.user_id, k.group_id, g.name, k.enabled, u.enabled,
-		       g.enabled AND (g.is_public OR EXISTS (
+		SELECT k.id, k.name, k.user_id, COALESCE(k.group_id, 0), COALESCE(g.name, ''), k.enabled, u.enabled,
+		       COALESCE(g.enabled AND (g.is_public OR EXISTS (
 			       SELECT 1 FROM group_user_groups gug
 			       JOIN user_group_members ugm ON ugm.user_group_id = gug.user_group_id
 			       WHERE gug.group_id = g.id AND ugm.user_id = COALESCE(p.owner_id, u.id)
-		       )) AND (p.id IS NULL OR EXISTS (SELECT 1 FROM project_groups pg WHERE pg.project_id = p.id AND pg.group_id = g.id)),
-		       g.ratio::text, g.retry_count, u.balance::text, u.reserved::text, k.quota_limit::text, k.quota_used::text, k.expires_at,
+		       )) AND (p.id IS NULL OR EXISTS (SELECT 1 FROM project_groups pg WHERE pg.project_id = p.id AND pg.group_id = g.id)), false),
+		       COALESCE(g.ratio, 0)::text, COALESCE(g.retry_count, 0), u.balance::text, u.reserved::text, k.quota_limit::text, k.quota_used::text, k.expires_at,
 		       COALESCE(p.id, 0), COALESCE(p.name, ''), COALESCE(po.username, ''), COALESCE(p.frozen, false), p.closed_at IS NOT NULL,
 		       EXISTS (SELECT 1 FROM project_members m WHERE m.project_id = p.id AND m.user_id = u.id AND m.status = 'active'),
 		       COALESCE(p.balance, 0)::text, COALESCE(p.reserved, 0)::text
 		FROM api_keys k
 		JOIN users u ON u.id = k.user_id
-		JOIN groups g ON g.id = k.group_id
+		LEFT JOIN groups g ON g.id = k.group_id
 		LEFT JOIN projects p ON p.id = k.project_id
 		LEFT JOIN users po ON po.id = p.owner_id
 		WHERE k.key_hash = $1`, keyHash,

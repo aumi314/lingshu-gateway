@@ -278,7 +278,9 @@ function ProjectDetail({ project, meID, onGone, onChanged, money }: { project: P
         columns={[
           { title: t('名称', 'Name'), dataIndex: 'name' },
           { title: 'Key', dataIndex: 'prefix', render: (v) => <span className="mono">{v}…</span> },
-          { title: t('分组', 'Group'), dataIndex: 'group_name' },
+          { title: t('分组', 'Group'), dataIndex: 'group_name', render: (name, k) => k.group_id === null
+            ? <Tag color="error">{t('分组已删除，请在 API keys 页重新选择', 'Group deleted. Choose a new group on the API keys page.')}</Tag>
+            : name },
           { title: t('已用', 'Used'), dataIndex: 'quota_used', render: (v) => money(v) },
           { title: t('最近调用', 'Last used'), dataIndex: 'last_used_at', render: (v) => (v ? dayjs(v).format('MM-DD HH:mm') : '—') },
         ]}

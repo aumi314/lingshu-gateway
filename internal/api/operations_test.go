@@ -289,7 +289,7 @@ func TestOperationLogRulesAndVisibility(t *testing.T) {
 	// 失败的操作随事务回滚，不留记录
 	bob.do("POST", "/api/me/keys", map[string]any{"name": "k", "group_id": 1}, nil)
 	n = e.opCount()
-	if code, _ := a.do("DELETE", "/api/admin/groups/1", nil, nil); code < 400 || e.opCount() != n {
+	if code, _ := a.do("DELETE", "/api/admin/groups/999", nil, nil); code != 404 || e.opCount() != n {
 		t.Fatalf("删除失败不应留记录: %d", code)
 	}
 	a.do("PATCH", "/api/admin/users/2", map[string]any{"note": "internal note"}, nil)

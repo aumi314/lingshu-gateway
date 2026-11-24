@@ -15,7 +15,9 @@ const path = require('node:path')
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, timezoneId: 'Asia/Shanghai' })
     const writes = []
     const deletes = []
+    const groupDeletes = []
     const errors = []
+    let role = 'user'
     page.on('pageerror', (e) => errors.push(e.message))
     const common = { prefix: 'sk-ls-fixture', group_id: 1, group_name: 'default', quota_limit: null, quota_used: '0', enabled: true, last_used_at: null, created_at: '2026-01-01T00:00:00Z' }
     const keys = [
@@ -27,9 +29,21 @@ const path = require('node:path')
       const req = route.request()
       const p = new URL(req.url()).pathname
       const json = (body, status = 200) => route.fulfill({ json: body, status })
-      if (p === '/api/me') return json({ user: { id: 2, username: 'member-fixture', role: 'user', balance: '8', enabled: true, user_group_ids: [], preferences: { theme: 'dark', language: 'zh' }, created_at: '2026-01-01' }, cny_per_usd: '6.7' })
+      if (p === '/api/me') return json({ user: { id: 2, username: 'member-fixture', role, balance: '8', enabled: true, user_group_ids: [], preferences: { theme: 'dark', language: 'zh' }, created_at: '2026-01-01' }, cny_per_usd: '6.7' })
       if (p === '/api/me/models') return json({ groups: [{ id: 1, name: 'default', ratio: '1', enabled: true, description: '' }], models: [] })
       if (p === '/api/me/endpoints') return json({ api_base_url: 'https://gateway.example/v1' })
+      if (p === '/api/me/projects/12') return json({ project: { id: 12, groups: [{ id: 3, name: 'project-group', ratio: '1' }] } })
+      if (p === '/api/admin/groups') return json([
+        { id: 51, name: 'used-collection', ratio: '1', enabled: true, is_public: true, is_collection: true, member_ids: [], user_group_ids: [] },
+        { id: 52, name: 'unused-group', ratio: '1', enabled: true, is_public: true, user_group_ids: [] },
+      ])
+      if (p === '/api/admin/user-groups') return json([])
+      if (p === '/api/admin/groups/51/delete-impact') return json({ key_count: 3, usernames: ['alice', 'bob'] })
+      if (p === '/api/admin/groups/52/delete-impact') return json({ key_count: 0, usernames: [] })
+      if (p.startsWith('/api/admin/groups/') && req.method() === 'DELETE') {
+        groupDeletes.push(p)
+        return json({ ok: true })
+      }
       if (p === '/api/me/keys' && req.method() === 'GET') return json(keys)
       if (p === '/api/me/keys' && req.method() === 'POST') {
         const body = req.postDataJSON()
@@ -41,7 +55,9 @@ const path = require('node:path')
       if (p.startsWith('/api/me/keys/') && req.method() === 'PATCH') {
         const body = req.postDataJSON()
         writes.push(body)
-        Object.assign(keys.find((k) => k.id === Number(p.split('/').at(-1))), body)
+        const key = keys.find((k) => k.id === Number(p.split('/').at(-1)))
+        Object.assign(key, body)
+        if (body.group_id === 3) key.group_name = 'project-group'
         return json({ ok: true })
       }
       if (p.startsWith('/api/me/keys/') && req.method() === 'DELETE') {
@@ -173,8 +189,33 @@ const path = require('node:path')
     if (process.env.KEYS_TEST_SCREENSHOT) await page.screenshot({ path: process.env.KEYS_TEST_SCREENSHOT, fullPage: true })
     const box = await dialog().boundingBox()
     assert.ok(box && box.y >= 0 && box.y + box.height <= 1000, '编辑窗口应在可见区域内')
+    await cancel()
+
+    keys.push({ ...common, id: 99, name: 'orphaned', group_id: null, group_name: '', project_id: 12, expires_at: null })
+    await page.reload()
+    await row(99).getByText('分组已删除，请重新选择', { exact: true }).waitFor()
+    await edit(99)
+    const beforeReselect = writes.length
+    await dialog().getByRole('button', { name: /保\s*存/ }).click()
+    assert.equal(writes.length, beforeReselect)
+    await dialog().getByRole('combobox', { name: '服务分组' }).click()
+    await page.locator('.ant-select-item-option').filter({ hasText: 'project-group' }).click()
+    await submit()
+    assert.equal(writes.at(-1).group_id, 3)
+    await row(99).getByText('project-group', { exact: true }).waitFor()
+
+    role = 'admin'
+    await page.goto('http://127.0.0.1:25197/console/admin/pricing?tab=groups')
+    await row(51).getByRole('button', { name: /删\s*除/ }).click()
+    await confirmation.getByText(/有 3 把 API key.*用户 alice、bob.*API keys 页重新选分组后恢复/).waitFor()
+    assert.deepEqual(groupDeletes, [])
+    await confirmation.getByRole('button', { name: /取\s*消/ }).click()
+    await confirmation.waitFor({ state: 'hidden' })
+    await row(52).getByRole('button', { name: /删\s*除/ }).click()
+    await confirmation.getByText('确定删除这个服务分组？', { exact: true }).waitFor()
+    assert.deepEqual(groupDeletes, [])
     assert.deepEqual(errors, [])
-    console.log('API key row editing and expiration browser regression passed')
+    console.log('API key editing, expiration and service group deletion browser regression passed')
   } finally {
     await browser.close()
     server.kill()

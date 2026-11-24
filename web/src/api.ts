@@ -112,7 +112,7 @@ export type APIKey = {
   id: number
   name: string
   prefix: string
-  group_id: number
+  group_id: number | null
   group_name: string
   quota_limit: string | null
   quota_used: string

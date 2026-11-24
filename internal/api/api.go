@@ -103,6 +103,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/admin/groups", s.admin(s.saveGroup))
 	mux.HandleFunc("PUT /api/admin/groups/order", s.admin(s.reorderGroups))
 	mux.HandleFunc("PUT /api/admin/groups/{id}", s.admin(s.saveGroup))
+	mux.HandleFunc("GET /api/admin/groups/{id}/delete-impact", s.admin(s.groupDeleteImpact))
 	mux.HandleFunc("DELETE /api/admin/groups/{id}", s.admin(s.deleteGroup))
 
 	mux.HandleFunc("GET /api/admin/models", s.admin(s.listModels))
@@ -200,7 +201,7 @@ func writeStoreError(w http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrNameTaken):
 		writeError(w, http.StatusConflict, "名称已存在，换一个名称")
 	case errors.Is(err, store.ErrInUse):
-		writeError(w, http.StatusConflict, "还有其他数据在使用它（比如 key 或渠道），先解除关联再删除")
+		writeError(w, http.StatusConflict, "还有数据在使用它，先解除关联再删除")
 	default:
 		slog.Error("接口出错", "err", err)
 		writeError(w, http.StatusInternalServerError, "服务器出错了，请稍后重试")
