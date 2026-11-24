@@ -126,6 +126,22 @@ export default function Channels() {
   // 站内没有同名模型、也没有有效映射的接入模型，标红并挡住保存
   const unresolved = connectedModels.filter((name) => !modelByName.has(name) && !rows.some((row) => row.upstream === name && row.model_id !== undefined && modelByID.has(row.model_id)))
 
+  // 自动映射：只处理标红的模型，去掉一层厂商前缀、版本号里的点和连字符视为相同（openai/gpt-6.2-sol、anthropic/claude-opus-5.5），
+  // 只有唯一候选才填，拿不准的留给管理员
+  const autoMap = () => {
+    const norm = (v: string) => v.trim().toLowerCase().replace(/^[^/]+\//, '').replace(/(\d)\.(?=\d)/g, '$1-')
+    const added: Row[] = []
+    const failed: string[] = []
+    for (const name of unresolved) {
+      const hits = models.filter((m) => norm(m.name) === norm(name))
+      if (hits.length === 1) added.push({ key: rowSeq++, upstream: name, model_id: hits[0].id })
+      else failed.push(name)
+    }
+    if (added.length) setRows((old) => [...old.filter((r) => !added.some((a) => a.upstream === r.upstream)), ...added])
+    if (failed.length) message.warning(t(`已自动映射 ${added.length} 个；这些没找到唯一对应的站内模型，请手动处理：${failed.join('、')}`, `Mapped ${added.length}; no unique site model for: ${failed.join(', ')}`))
+    else message.success(t(`已自动映射 ${added.length} 个模型`, `Mapped ${added.length} models`))
+  }
+
   const removeModel = (name: string) => {
     setConnectedModels((old) => old.filter((item) => item !== name))
     setRows((old) => old.filter((row) => row.upstream !== name))
@@ -743,14 +759,17 @@ export default function Channels() {
           <Typography.Paragraph type="secondary">
             {t('需要时才加：客户端请求站内模型，发给上游的是左边的名字', 'Map only when needed: clients request the site model, and the name on the left goes upstream')}
           </Typography.Paragraph>
-          <div style={{ marginBottom: 12 }}>
+          <Space style={{ marginBottom: 12 }}>
             <Button icon={<PlusOutlined />} onClick={() => {
               const row = { key: rowSeq++, upstream: '' }
               setRows((old) => [...old, row])
             }}>
               {t('添加映射', 'Add mapping')}
             </Button>
-          </div>
+            <Button disabled={unresolved.length === 0} onClick={autoMap}>
+              {t('自动映射', 'Auto map')}
+            </Button>
+          </Space>
           {rows.length > 0 ? (
             <Table
               size="small"
