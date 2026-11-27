@@ -487,9 +487,10 @@ func TestDisabledUserKeyAndReenable(t *testing.T) {
 	e.exec(`UPDATE users SET enabled = false`)
 	e.upstream = func(w http.ResponseWriter, r *http.Request) { t.Error("停用用户不应请求上游") }
 	resp := e.post("/v1/chat/completions", `{"model":"std-chat"}`, nil)
+	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("停用用户应返回 403，实际 %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden || !strings.Contains(string(body), "账号已被停用") {
+		t.Fatalf("停用用户应返回 403 并说明账号停用，实际 %d %s", resp.StatusCode, body)
 	}
 	e.exec(`UPDATE users SET enabled = true`)
 	e.upstream = okUpstream
@@ -497,6 +498,19 @@ func TestDisabledUserKeyAndReenable(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("重新启用后原 key 应恢复，实际 %d", resp.StatusCode)
+	}
+}
+
+// 用户自己停用的 key：提示去 API keys 页面重新启用，而不是让人去找管理员
+func TestDisabledKeyPointsToKeysPage(t *testing.T) {
+	e := newEnv(t)
+	e.exec(`UPDATE api_keys SET enabled = false`)
+	e.upstream = func(w http.ResponseWriter, r *http.Request) { t.Error("停用的 key 不应请求上游") }
+	resp := e.post("/v1/chat/completions", `{"model":"std-chat"}`, nil)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || !strings.Contains(string(body), "API keys 页面重新启用") {
+		t.Fatalf("停用 key 应返回 403 并指向 API keys 页面，实际 %d %s", resp.StatusCode, body)
 	}
 }
 

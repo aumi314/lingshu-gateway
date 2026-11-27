@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Alert, App, Button, Card, DatePicker, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography } from 'antd'
+import { Alert, App, Button, Card, DatePicker, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd'
 import { ExportOutlined, PlusOutlined } from '@ant-design/icons'
 import dayjs, { type Dayjs } from 'dayjs'
 import { del, get, patch, post, type APIKey, type Group, type PricedModel, type Project } from '../api'
@@ -19,6 +19,7 @@ export default function Keys() {
   const [editing, setEditing] = useState<APIKey | 'new' | null>(null)
   const [project, setProject] = useState<Project | null>(null)
   const [created, setCreated] = useState('')
+  const [toggling, setToggling] = useState<number[]>([]) // 正在切换启停的 key，开关显示加载中
   // 打开编辑时记下原来的过期时间：原来就过期的 key 允许只改名字，不算新选的过期时间
   const [originalExpiry, setOriginalExpiry] = useState<Dayjs | null>(null)
   const [form] = Form.useForm<KeyForm>()
@@ -100,11 +101,14 @@ export default function Keys() {
   }
 
   const toggle = async (k: APIKey, enabled: boolean) => {
+    setToggling((ids) => [...ids, k.id])
     try {
       await patch(`/api/me/keys/${k.id}`, { enabled })
-      load()
+      await load()
     } catch (e) {
       message.error((e as Error).message)
+    } finally {
+      setToggling((ids) => ids.filter((id) => id !== k.id))
     }
   }
 
@@ -127,9 +131,12 @@ export default function Keys() {
         <Typography.Title level={3} style={{ margin: 0 }}>
           API keys
         </Typography.Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={openNew} disabled={!groups.length}>
-          {t('创建 API key', 'Create API key')}
-        </Button>
+        {/* 没有可用分组时按钮不可点，悬停说明原因和该找谁 */}
+        <Tooltip title={!loading && !groups.length ? t('你还没有可用的服务分组，请联系管理员开通', 'No service group is available to you yet. Ask an admin.') : undefined}>
+          <Button type="primary" icon={<PlusOutlined />} onClick={openNew} disabled={!groups.length}>
+            {t('创建 API key', 'Create API key')}
+          </Button>
+        </Tooltip>
       </Space>
       <Typography.Paragraph type="secondary">
         {t(
@@ -184,7 +191,7 @@ export default function Keys() {
             dataIndex: 'last_used_at',
             render: (v) => (v ? dayjs(v).format('YYYY-MM-DD HH:mm') : <span className="muted">{t('从未', 'Never')}</span>),
           },
-          { title: t('启用', 'Enabled'), dataIndex: 'enabled', render: (v, k) => <Switch size="small" checked={v} onChange={(c) => toggle(k, c)} /> },
+          { title: t('启用', 'Enabled'), dataIndex: 'enabled', render: (v, k) => <Switch size="small" checked={v} loading={toggling.includes(k.id)} onChange={(c) => toggle(k, c)} /> },
           {
             title: '',
             align: 'right',

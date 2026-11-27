@@ -96,6 +96,7 @@ export default function ModelsAdmin() {
   const remove = async (m: Model) => {
     try {
       await del(`/api/admin/models/${m.id}`)
+      message.success(t('已删除', 'Deleted'))
       load()
     } catch (e) {
       message.error((e as Error).message)

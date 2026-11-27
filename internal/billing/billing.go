@@ -39,7 +39,7 @@ type Rejection struct {
 // Admit 检查余额和 key 限额。允许小额透支：只要请求前余额 > 0 就放行，结算后可以变成负数。
 func Admit(balance decimal.Decimal, quotaLimit *decimal.Decimal, quotaUsed decimal.Decimal) *Rejection {
 	if !balance.IsPositive() {
-		return &Rejection{Status: 402, Message: "账户余额不足（当前 $" + balance.StringFixed(4) + "），请联系管理员充值"}
+		return &Rejection{Status: 402, Message: "账户余额不足（当前 $" + balance.StringFixed(4) + "），请到控制台「钱包充值」充值，或联系管理员"}
 	}
 	return AdmitQuota(quotaLimit, quotaUsed)
 }

@@ -21,11 +21,10 @@ const statusTag = (t: (zh: string, en: string) => string, s: Project['my_status'
   ({ owner: <Tag color="gold">{t('创建人', 'Owner')}</Tag>, active: <Tag color="green">{t('成员', 'Member')}</Tag>, pending: <Tag>{t('待审批', 'Pending')}</Tag>, '': null })[s]
 
 export default function Projects() {
-  const { t, money, user, zone } = useApp()
+  const { t, money, user } = useApp()
   const { message } = App.useApp()
   const [data, setData] = useState<MyProjects | null>(null)
   const [params, setParams] = useSearchParams()
-  const { token } = theme.useToken()
   const [creating, setCreating] = useState(false)
   const [joinCode, setJoinCode] = useState('')
   const [form] = Form.useForm<{ name: string }>()
@@ -94,7 +93,7 @@ export default function Projects() {
       <Space wrap style={{ marginBottom: 20 }}>
         <Space.Compact>
           <Input placeholder={t('输入邀请码', 'Invite code')} value={joinCode} onChange={(e) => setJoinCode(e.target.value)} onPressEnter={join} style={{ width: 180 }} className="mono" />
-          <Button onClick={join}>{t('申请加入', 'Request to join')}</Button>
+          <Button onClick={join} disabled={!joinCode.trim()}>{t('申请加入', 'Request to join')}</Button>
         </Space.Compact>
         {data.can_create && (
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreating(true)}>
@@ -123,39 +122,42 @@ export default function Projects() {
       </Modal>
     </div>
   )
+}
 
-  function ProjectCard({ p, active, onOpen }: { p: Project; active: boolean; onOpen: () => void }) {
-    const avail = Number(p.balance) - Number(p.reserved)
-    const limit = p.my_limit == null ? null : Number(p.my_limit)
-    const now = periodText(t, p.my_period, zone).now
-    return (
-      <Card
-        size="small"
-        hoverable={p.my_status !== 'pending'}
-        onClick={onOpen}
-        aria-current={active || undefined}
-        className="project-card"
-        style={active ? { borderColor: token.colorPrimary, boxShadow: `0 0 0 1px ${token.colorPrimary}` } : undefined}
-        title={<Space size={6}>{p.name}{statusTag(t, p.my_status)}{p.frozen && <Tag color="red">{t('已冻结', 'Frozen')}</Tag>}</Space>}
-      >
-        {p.my_status === 'pending' ? (
-          <Typography.Text type="secondary">{t(`已申请，等待 ${p.owner_name} 审批`, `Waiting for ${p.owner_name} to approve`)}</Typography.Text>
-        ) : (
-          <Space direction="vertical" style={{ width: '100%' }} size={6}>
-            <Typography.Text type="secondary">{t('池子可用', 'Pool available')}</Typography.Text>
-            <Typography.Text style={{ fontSize: 20 }}>{money(avail)}</Typography.Text>
-            <Typography.Text type="secondary">
-              {limit == null ? t(`我${now}已花 ${money(p.my_spent)}，不限额度`, `I spent ${money(p.my_spent)} ${now}, no cap`) : t(`我${now}已花 ${money(p.my_spent)} / ${money(limit)}`, `I spent ${money(p.my_spent)} / ${money(limit)} ${now}`)}
-            </Typography.Text>
-            {limit != null && <Progress percent={Math.min(100, Math.round((Number(p.my_spent) / limit) * 100))} size="small" showInfo={false} />}
-            <Typography.Text type="secondary">
-              <TeamOutlined /> {p.members} · {t('负责人', 'Owner')} {p.owner_name}
-            </Typography.Text>
-          </Space>
-        )}
-      </Card>
-    )
-  }
+// 卡片放在页面组件外面：放在里面时每次渲染都是新组件，整块重建，选中边框没法过渡、焦点也会丢
+function ProjectCard({ p, active, onOpen }: { p: Project; active: boolean; onOpen: () => void }) {
+  const { t, money, zone } = useApp()
+  const { token } = theme.useToken()
+  const avail = Number(p.balance) - Number(p.reserved)
+  const limit = p.my_limit == null ? null : Number(p.my_limit)
+  const now = periodText(t, p.my_period, zone).now
+  return (
+    <Card
+      size="small"
+      hoverable={p.my_status !== 'pending'}
+      onClick={onOpen}
+      aria-current={active || undefined}
+      className="project-card"
+      style={active ? { borderColor: token.colorPrimary, boxShadow: `0 0 0 1px ${token.colorPrimary}` } : undefined}
+      title={<Space size={6}>{p.name}{statusTag(t, p.my_status)}{p.frozen && <Tag color="red">{t('已冻结', 'Frozen')}</Tag>}</Space>}
+    >
+      {p.my_status === 'pending' ? (
+        <Typography.Text type="secondary">{t(`已申请，等待 ${p.owner_name} 审批`, `Waiting for ${p.owner_name} to approve`)}</Typography.Text>
+      ) : (
+        <Space direction="vertical" style={{ width: '100%' }} size={6}>
+          <Typography.Text type="secondary">{t('池子可用', 'Pool available')}</Typography.Text>
+          <Typography.Text style={{ fontSize: 20 }}>{money(avail)}</Typography.Text>
+          <Typography.Text type="secondary">
+            {limit == null ? t(`我${now}已花 ${money(p.my_spent)}，不限额度`, `I spent ${money(p.my_spent)} ${now}, no cap`) : t(`我${now}已花 ${money(p.my_spent)} / ${money(limit)}`, `I spent ${money(p.my_spent)} / ${money(limit)} ${now}`)}
+          </Typography.Text>
+          {limit != null && <Progress percent={Math.min(100, Math.round((Number(p.my_spent) / limit) * 100))} size="small" showInfo={false} />}
+          <Typography.Text type="secondary">
+            <TeamOutlined /> {p.members} · {t('负责人', 'Owner')} {p.owner_name}
+          </Typography.Text>
+        </Space>
+      )}
+    </Card>
+  )
 }
 
 function ProjectDetail({ project, meID, onGone, onChanged, money }: { project: Project; meID: number; onGone: () => void; onChanged: () => void; money: (v: string | number, d?: number) => string }) {
