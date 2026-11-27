@@ -111,7 +111,8 @@ export default function Projects() {
           ))}
         </div>
       )}
-      {selected && <ProjectDetail key={selected.id} project={selected} meID={user?.id ?? 0} onGone={() => { select(); load() }} onChanged={load} money={money} />}
+      {/* 换项目时详情淡入，交代"下面换成了这个项目" */}
+      {selected && <div key={selected.id} className="ls-enter"><ProjectDetail project={selected} meID={user?.id ?? 0} onGone={() => { select(); load() }} onChanged={load} money={money} /></div>}
 
       <Modal open={creating} title={t('创建项目', 'Create project')} onOk={create} onCancel={() => setCreating(false)} okText={t('创建', 'Create')} destroyOnHidden>
         <Form form={form} layout="vertical" requiredMark={false}>

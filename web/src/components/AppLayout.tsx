@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Avatar, Button, Drawer, Grid, Layout, Menu, Typography, theme } from 'antd'
 import {
   ApiOutlined,
@@ -20,6 +20,31 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useApp } from '../app'
 import { get, isAdmin, type MyProjects } from '../api'
 import Logo from './Logo'
+import { DUR, EASE_OUT, prefersReducedMotion } from '../motion'
+
+// 换页：新页面从顶部开始，轻轻浮上来，告诉用户"内容换了"；首次进入不动
+function PageView() {
+  const { pathname } = useLocation()
+  const ref = useRef<HTMLDivElement>(null)
+  const shown = useRef(pathname)
+  // 布局阶段就起动画：新页面的第一帧已经是起点，不会先实后虚闪一下
+  useLayoutEffect(() => {
+    if (shown.current === pathname) return
+    shown.current = pathname
+    window.scrollTo(0, 0)
+    if (prefersReducedMotion()) return
+    const a = ref.current?.animate(
+      [{ opacity: 0, transform: 'translateY(6px)' }, { opacity: 1, transform: 'none' }],
+      { duration: DUR.base, easing: EASE_OUT },
+    )
+    return () => a?.cancel()
+  }, [pathname])
+  return (
+    <div ref={ref}>
+      <Outlet />
+    </div>
+  )
+}
 
 export default function AppLayout() {
   const { user, t } = useApp()
@@ -136,7 +161,7 @@ export default function AppLayout() {
           {sidebar}
         </Drawer>
         <Layout.Content>
-          <Outlet />
+          <PageView />
         </Layout.Content>
       </Layout>
     )
@@ -157,7 +182,7 @@ export default function AppLayout() {
         {sidebar}
       </Layout.Sider>
       <Layout.Content>
-        <Outlet />
+        <PageView />
       </Layout.Content>
     </Layout>
   )

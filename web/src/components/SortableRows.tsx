@@ -7,6 +7,7 @@ import { DndContext, PointerSensor, useSensor, useSensors, type DragEndEvent } f
 import { restrictToVerticalAxis } from '@dnd-kit/modifiers'
 import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
+import { DUR, EASE_OUT, prefersReducedMotion } from '../motion'
 
 type HandleProps = { setActivatorNodeRef?: (el: HTMLElement | null) => void; listeners?: Record<string, unknown> }
 const HandleContext = createContext<HandleProps>({})
@@ -19,14 +20,15 @@ export function DragHandle({ title }: { title?: string }) {
 export function SortableRow(props: HTMLAttributes<HTMLTableRowElement> & { 'data-row-key': string }) {
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({
     id: String(props['data-row-key']),
-    transition: { duration: 220, easing: 'cubic-bezier(0.2, 0, 0, 1)' },
+    transition: { duration: DUR.base, easing: EASE_OUT },
   })
   const translate = CSS.Translate.toString(transform)
   const style: CSSProperties = {
     ...props.style,
     // 拿起来时稍微放大，像把卡片从桌面上拿起
     transform: isDragging ? `${translate ?? ''} scale(1.015)` : translate,
-    transition: isDragging ? 'box-shadow 150ms ease' : transition,
+    // 拖动中直接跟手，不加位移过渡
+    transition: isDragging ? `box-shadow ${DUR.fast}ms ${EASE_OUT}` : transition,
     ...(isDragging ? { position: 'relative', zIndex: 9 } : {}),
   }
   const ctx = useMemo(() => ({ setActivatorNodeRef, listeners }), [setActivatorNodeRef, listeners])
@@ -44,12 +46,12 @@ function settle(id: string, releasedTop: number) {
     const row = document.querySelector<HTMLElement>(`tr[data-row-key="${window.CSS.escape(id)}"]`)
     if (!row) return
     const delta = releasedTop - row.getBoundingClientRect().top
-    if (Math.abs(delta) < 1) return
+    if (Math.abs(delta) < 1 || prefersReducedMotion()) return
     row.classList.add('row-settling')
     row.style.transition = 'none'
     row.style.transform = `translate3d(0, ${delta}px, 0) scale(1.015)`
     row.getBoundingClientRect() // 强制先应用起点
-    row.style.transition = 'transform 220ms cubic-bezier(0.2, 0, 0, 1)'
+    row.style.transition = `transform ${DUR.base}ms ${EASE_OUT}`
     row.style.transform = ''
     row.addEventListener('transitionend', () => {
       row.classList.remove('row-settling')

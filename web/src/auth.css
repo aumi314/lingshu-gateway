@@ -53,7 +53,7 @@
   stroke-width: 1;
   stroke-dasharray: 1;
   stroke-dashoffset: 1;
-  animation: ls-auth-draw 1.2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  animation: ls-auth-draw 1.2s var(--ls-ease-in-out) forwards;
 }
 @keyframes ls-auth-draw {
   to {
@@ -104,7 +104,7 @@
   align-items: center;
   gap: 14px;
   color: var(--paper);
-  transition: opacity 0.2s;
+  transition: opacity var(--ls-dur-instant) var(--ls-ease-out);
 }
 .ls-auth .ls-auth-brand:hover {
   color: var(--paper);
@@ -247,7 +247,9 @@
   letter-spacing: 0.04em;
   background: linear-gradient(135deg, #8ff0d6, var(--jade) 45%, #3cc7a5);
   box-shadow: 0 0 0 1px rgba(110, 231, 200, 0.35), 0 12px 34px -12px rgba(110, 231, 200, 0.65);
-  transition: box-shadow 0.3s, filter 0.3s, transform 0.2s;
+  transition:
+    box-shadow var(--ls-dur-base) var(--ls-ease-out),
+    transform var(--ls-dur-fast) var(--ls-ease-out);
 }
 .ls-auth .ant-btn-primary:not(:disabled):hover {
   color: #06120f;
@@ -255,7 +257,8 @@
   box-shadow: 0 0 0 1px rgba(110, 231, 200, 0.6), 0 16px 44px -10px rgba(110, 231, 200, 0.8);
 }
 .ls-auth .ant-btn-primary:not(:disabled):active {
-  transform: scale(0.99);
+  transform: scale(0.98);
+  transition-duration: var(--ls-dur-instant);
 }
 
 /* ---- 窄屏：只留表单 ---- */

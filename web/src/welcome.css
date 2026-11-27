@@ -87,10 +87,13 @@
   font-size: 13px;
   cursor: pointer;
   padding: 8px;
-  transition: color 0.2s;
+  transition: color var(--ls-dur-instant) var(--ls-ease-out), opacity var(--ls-dur-instant) var(--ls-ease-out);
 }
 .ls-lang:hover {
   color: var(--paper);
+}
+.ls-lang:active {
+  opacity: 0.6;
 }
 
 /* ---- 按钮 ---- */
@@ -103,11 +106,17 @@
   border-radius: 999px;
   font-size: 15px;
   cursor: pointer;
-  transition: transform 0.2s, box-shadow 0.3s, background 0.3s, border-color 0.3s;
+  /* 按下立刻缩，松开再弹回；光晕和底色跟着悬停慢半拍 */
+  transition:
+    transform var(--ls-dur-fast) var(--ls-ease-out),
+    box-shadow var(--ls-dur-base) var(--ls-ease-out),
+    background var(--ls-dur-base) var(--ls-ease-out),
+    border-color var(--ls-dur-base) var(--ls-ease-out);
   white-space: nowrap;
 }
 .ls-btn:active {
-  transform: scale(0.98);
+  transform: scale(0.97);
+  transition-duration: var(--ls-dur-instant);
 }
 .ls-btn-primary {
   border: none;
@@ -120,7 +129,7 @@
   box-shadow: 0 0 0 1px rgba(110, 231, 200, 0.6), 0 14px 56px -6px rgba(110, 231, 200, 0.75);
 }
 .ls-btn-primary span {
-  transition: transform 0.25s;
+  transition: transform var(--ls-dur-base) var(--ls-ease-out);
 }
 .ls-btn-primary:hover span {
   transform: translateX(4px);
@@ -387,10 +396,26 @@
   background: var(--cinnabar);
 }
 .ls-tabs {
+  position: relative;
   display: flex;
   gap: 4px;
   flex: 1;
   overflow-x: auto;
+}
+/* 选中标签底下的滑块：在标签之间滑过去，而不是一个灭一个亮 */
+.ls-tab-pill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  border-radius: 6px;
+  background: var(--paper);
+  pointer-events: none;
+}
+.ls-tab-pill.ready {
+  transition:
+    transform var(--ls-dur-base) var(--ls-ease-in-out),
+    width var(--ls-dur-base) var(--ls-ease-in-out);
 }
 .ls-tabs button,
 .ls-copy {
@@ -401,16 +426,22 @@
   padding: 6px 12px;
   border-radius: 6px;
   cursor: pointer;
-  transition: color 0.2s, background 0.2s;
+  transition: color var(--ls-dur-fast) var(--ls-ease-out), opacity var(--ls-dur-instant) var(--ls-ease-out);
   white-space: nowrap;
+}
+.ls-tabs button {
+  position: relative;
 }
 .ls-tabs button:hover,
 .ls-copy:hover {
   color: var(--paper);
 }
+.ls-tabs button:active,
+.ls-copy:active {
+  opacity: 0.6;
+}
 .ls-tabs button.active {
   color: var(--ink);
-  background: var(--paper);
 }
 .ls-copy {
   color: var(--jade);
@@ -476,7 +507,7 @@
   opacity: 0;
   filter: blur(14px);
   transform: translateY(0.12em) scale(1.08);
-  animation: ls-ink 1.3s cubic-bezier(0.2, 0.7, 0.1, 1) forwards;
+  animation: ls-ink 1.3s var(--ls-ease-out) forwards;
 }
 @keyframes ls-ink {
   60% {
@@ -493,7 +524,7 @@
 [data-reveal] {
   opacity: 0;
   transform: translateY(28px);
-  transition: opacity 1s cubic-bezier(0.2, 0.7, 0.2, 1), transform 1s cubic-bezier(0.2, 0.7, 0.2, 1);
+  transition: opacity 0.9s var(--ls-ease-out), transform 0.9s var(--ls-ease-out);
 }
 [data-reveal].is-in {
   opacity: 1;
@@ -504,7 +535,7 @@
 .ls-veins[data-reveal] .ls-vein {
   opacity: 0;
   transform: translateY(20px);
-  transition: opacity 0.9s, transform 0.9s cubic-bezier(0.2, 0.7, 0.2, 1);
+  transition: opacity 0.9s var(--ls-ease-out), transform 0.9s var(--ls-ease-out);
 }
 .ls-stats.is-in .ls-stat,
 .ls-veins.is-in .ls-vein {
@@ -520,7 +551,7 @@
   border-radius: 14px;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 0.4s;
+  transition: opacity var(--ls-dur-slow) var(--ls-ease-out);
   background: radial-gradient(260px circle at var(--gx, 50%) var(--gy, 50%), rgba(110, 231, 200, 0.09), transparent 70%);
 }
 .ls-vein + .ls-vein::after {
@@ -532,10 +563,28 @@
 .ls-vein-char {
   background-size: 100% 220%;
   background-position: 0 0;
-  transition: background-position 0.8s cubic-bezier(0.2, 0.7, 0.2, 1);
+  transition: background-position 0.8s var(--ls-ease-out);
 }
 .ls-vein:hover .ls-vein-char {
   background-position: 0 100%;
+}
+
+/* ---- 换文字（复制 → 已复制）：两个字叠在同一格里交叉淡化，按钮宽度不跳 ---- */
+.ls-swap {
+  display: inline-grid;
+}
+.ls-swap > span {
+  grid-area: 1 / 1;
+  text-align: center;
+  transition: opacity var(--ls-dur-fast) var(--ls-ease-out), transform var(--ls-dur-fast) var(--ls-ease-out);
+}
+.ls-swap[data-on='true'] > span:first-child {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+.ls-swap[data-on='false'] > span:last-child {
+  opacity: 0;
+  transform: translateY(4px);
 }
 
 /* ---- 终端光标 ---- */
@@ -562,7 +611,7 @@
 .ls-rise {
   opacity: 0;
   transform: translateY(16px);
-  animation: ls-rise 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
+  animation: ls-rise 0.9s var(--ls-ease-out) forwards;
 }
 @keyframes ls-rise {
   to {

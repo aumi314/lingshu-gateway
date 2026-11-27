@@ -1,0 +1,94 @@
+/*
+ * 全站动效语言（首页、登录注册、控制台共用）。规则见 docs/decisions.md「界面 › 动效」。
+ * 一条曲线管"出现 / 移动"，一条管"原地两态之间来回"；时长按"用户多常做这件事"分档，越常做越快。
+ * Ant Design 组件的时长和曲线在 main.tsx 里映射到同一组值，JS 里用 motion.ts。
+ */
+:root {
+  /* 出现、移动、展开：起步快、收尾轻，像东西"落"到位 */
+  --ls-ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  /* 原地切换（滑块在两项之间移动、主题交叉淡化）：两头都柔 */
+  --ls-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+
+  --ls-dur-instant: 100ms; /* 悬停、按下：反复做的操作，几乎不等 */
+  --ls-dur-fast: 160ms; /* 小块换内容：文字、图标、勾 */
+  --ls-dur-base: 240ms; /* 位置和大小：滑块、展开收起、排序落位、换页 */
+  --ls-dur-slow: 400ms; /* 只给首页装饰性的光晕 */
+}
+
+/* 按下复制后出现的勾：轻轻弹出来，告诉用户"成了" */
+@keyframes ls-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+}
+.ant-typography-copy-success .anticon {
+  animation: ls-pop var(--ls-dur-fast) var(--ls-ease-out);
+}
+
+/* 一块内容换成另一块（换了选中的对象）：新内容轻轻浮上来 */
+@keyframes ls-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+.ls-enter {
+  animation: ls-enter var(--ls-dur-base) var(--ls-ease-out);
+}
+
+/* 统计数字用等宽数字：数值刷新时不左右抖 */
+.ant-statistic-content {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 高度展开收起：外层网格从 0fr 过渡到 1fr，内容不用量高度；收起后不可聚焦 */
+.ls-collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition:
+    grid-template-rows var(--ls-dur-base) var(--ls-ease-out),
+    opacity var(--ls-dur-fast) var(--ls-ease-out);
+}
+.ls-collapse > * {
+  min-height: 0;
+  overflow: hidden;
+}
+.ls-collapse[data-open='false'] {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    grid-template-rows var(--ls-dur-base) var(--ls-ease-out),
+    opacity var(--ls-dur-fast) var(--ls-ease-out),
+    visibility 0s var(--ls-dur-base);
+}
+
+/* 换主题、换语言：整页交叉淡化，而不是一帧里全部跳变 */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: var(--ls-dur-base);
+  animation-timing-function: var(--ls-ease-in-out);
+}
+
+/*
+ * 系统开了"减少动态效果"：位移、缩放、淡入一律直接到终点。
+ * 加载中的转圈是进度信息不是装饰，保留。
+ */
+@media (prefers-reduced-motion: reduce) {
+  *:not(.ant-spin-dot):not(.ant-spin-dot-item):not(.anticon-spin),
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    animation-delay: 0s !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
+    scroll-behavior: auto !important;
+  }
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
+}
