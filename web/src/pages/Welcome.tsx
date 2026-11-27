@@ -1,5 +1,5 @@
 // 首页：不需要登录，不请求任何数据。视觉取《灵枢》经络之意——一枢通百脉。
-import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useApp } from '../app'
 import Logo from '../components/Logo'
@@ -117,6 +117,37 @@ function Typewriter({ code, render }: { code: string; render: (s: string) => Rea
       <span className={`ls-caret${shown >= code.length ? ' done' : ''}`} aria-hidden="true" />
     </pre>
   )
+}
+
+// 两段文字叠在一格里交叉淡化（复制 → 已复制），宽度取两者较宽的，按钮不跳
+function SwapText({ on, off, onText }: { on: boolean; off: string; onText: string }) {
+  return (
+    <span className="ls-swap" data-on={on}>
+      <span aria-hidden={on}>{off}</span>
+      <span aria-hidden={!on}>{onText}</span>
+    </span>
+  )
+}
+
+// 终端标签栏的滑块：量出选中标签的位置和宽度，滑过去；第一次定位不播动画
+function TabPill({ active }: { active: string }) {
+  const ref = useRef<HTMLSpanElement>(null)
+  useLayoutEffect(() => {
+    const pill = ref.current!
+    const btn = pill.parentElement?.querySelector<HTMLElement>(`[data-tab="${active}"]`)
+    if (!btn) return
+    const place = () => {
+      pill.style.width = `${btn.offsetWidth}px`
+      pill.style.transform = `translateX(${btn.offsetLeft}px)`
+    }
+    place()
+    const id = requestAnimationFrame(() => pill.classList.add('ready'))
+    // 字体加载完、窗口变宽窄时标签宽度会变，跟着重新定位
+    const ro = new ResizeObserver(place)
+    ro.observe(btn)
+    return () => (cancelAnimationFrame(id), ro.disconnect())
+  }, [active])
+  return <span ref={ref} className="ls-tab-pill" aria-hidden="true" />
 }
 
 // 卡片边框的光跟着鼠标走
@@ -255,7 +286,7 @@ resp = client.chat.completions.create(
             </button>
             <button className="ls-btn ls-btn-ghost" onClick={() => copy(`${base}/v1`, 'hero')}>
               <code>{base.replace(/^https?:\/\//, '')}/v1</code>
-              <span className="ls-copy-hint">{copied === 'hero' ? t('已复制', 'Copied') : t('复制', 'Copy')}</span>
+              <span className="ls-copy-hint"><SwapText on={copied === 'hero'} off={t('复制', 'Copy')} onText={t('已复制', 'Copied')} /></span>
             </button>
           </div>
         </div>
@@ -313,14 +344,15 @@ resp = client.chat.completions.create(
               <i />
             </span>
             <div className="ls-tabs" role="tablist">
+              <TabPill active={tab} />
               {snippets.map((s) => (
-                <button key={s.id} role="tab" aria-selected={tab === s.id} className={tab === s.id ? 'active' : ''} onClick={() => setTab(s.id)}>
+                <button key={s.id} data-tab={s.id} role="tab" aria-selected={tab === s.id} className={tab === s.id ? 'active' : ''} onClick={() => setTab(s.id)}>
                   {s.label}
                 </button>
               ))}
             </div>
             <button className="ls-copy" onClick={() => copy(current.code.replace(/^\$ /gm, ''), current.id)}>
-              {copied === current.id ? t('已复制', 'Copied') : t('复制', 'Copy')}
+              <SwapText on={copied === current.id} off={t('复制', 'Copy')} onText={t('已复制', 'Copied')} />
             </button>
           </div>
           <Typewriter code={current.code} render={highlight} />

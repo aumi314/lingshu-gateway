@@ -647,14 +647,24 @@ export default function Meridian() {
       ctx.globalCompositeOperation = 'source-over'
     }
 
+    // 首屏滚出视野后停画：往下读的时候不再为看不见的星图占用 GPU，回来时接着动
+    let onScreen = true
     const tick = (now: number) => {
       const dt = Math.min((now - last) / 1000, 0.05)
       last = now
       time += dt
       if (Math.random() < dt * 6) spawnPulse()
       draw(dt)
-      raf = requestAnimationFrame(tick)
+      raf = onScreen ? requestAnimationFrame(tick) : 0
     }
+    const io = new IntersectionObserver(([e]) => {
+      onScreen = e.isIntersecting
+      if (onScreen && !raf && !reduced && nodes.length) {
+        last = performance.now()
+        raf = requestAnimationFrame(tick)
+      }
+    })
+    io.observe(canvas)
 
     resize()
     const ro = new ResizeObserver(resize)
@@ -695,6 +705,7 @@ export default function Meridian() {
       cancelled = true
       cancelAnimationFrame(raf)
       ro.disconnect()
+      io.disconnect()
       window.removeEventListener('pointermove', onMove)
       document.removeEventListener('pointerleave', onLeave)
     }
