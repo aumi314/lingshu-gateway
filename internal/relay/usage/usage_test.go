@@ -17,19 +17,19 @@ func TestFixtures(t *testing.T) {
 		want       Usage
 		responseID string
 	}{
-		{"deepseek_chat.json", Chat, Usage{Input: 37, Output: 37, Reasoning: 28}, ""},
-		{"deepseek_chat.sse", Chat, Usage{Input: 37, Output: 42, Reasoning: 34}, ""},
-		{"deepseek_responses.json", Responses, Usage{Input: 37, Output: 62, Reasoning: 53}, "ae83a80e-c19b-45e1-aca9-f7372368c21b"},
-		{"deepseek_responses.sse", Responses, Usage{Input: 37, Output: 26, Reasoning: 17}, ""},
-		{"zhipu_chat.json", Chat, Usage{Input: 19, Output: 42, Reasoning: 33}, ""},
-		{"zhipu_chat.sse", Chat, Usage{Input: 19, Output: 43, Reasoning: 34}, ""},
-		{"mimo_chat.json", Chat, Usage{Input: 14, Output: 24, Reasoning: 14}, ""},
-		{"mimo_chat.sse", Chat, Usage{Input: 14, Output: 17, Reasoning: 10}, ""},
-		{"moonshot_chat.json", Chat, Usage{Input: 92, Output: 48, Reasoning: 26}, ""},
-		{"moonshot_chat.sse", Chat, Usage{Input: 92, Output: 110, Reasoning: 88}, ""},
+		{"deepseek_chat.json", Chat, Usage{Input: 37, Output: 37, Reasoning: 28, ReasoningReported: true}, ""},
+		{"deepseek_chat.sse", Chat, Usage{Input: 37, Output: 42, Reasoning: 34, ReasoningReported: true}, ""},
+		{"deepseek_responses.json", Responses, Usage{Input: 37, Output: 62, Reasoning: 53, ReasoningReported: true}, "ae83a80e-c19b-45e1-aca9-f7372368c21b"},
+		{"deepseek_responses.sse", Responses, Usage{Input: 37, Output: 26, Reasoning: 17, ReasoningReported: true}, ""},
+		{"zhipu_chat.json", Chat, Usage{Input: 19, Output: 42, Reasoning: 33, ReasoningReported: true}, ""},
+		{"zhipu_chat.sse", Chat, Usage{Input: 19, Output: 43, Reasoning: 34, ReasoningReported: true}, ""},
+		{"mimo_chat.json", Chat, Usage{Input: 14, Output: 24, Reasoning: 14, ReasoningReported: true}, ""},
+		{"mimo_chat.sse", Chat, Usage{Input: 14, Output: 17, Reasoning: 10, ReasoningReported: true}, ""},
+		{"moonshot_chat.json", Chat, Usage{Input: 92, Output: 48, Reasoning: 26, ReasoningReported: true}, ""},
+		{"moonshot_chat.sse", Chat, Usage{Input: 92, Output: 110, Reasoning: 88, ReasoningReported: true}, ""},
 		// StepFun 每块都带累计 usage，只能取最后一块
-		{"stepfun_chat.json", Chat, Usage{Input: 18, Output: 86}, ""},
-		{"stepfun_chat.sse", Chat, Usage{Input: 18, Output: 57}, ""},
+		{"stepfun_chat.json", Chat, Usage{Input: 18, Output: 86, ReasoningReported: true}, ""},
+		{"stepfun_chat.sse", Chat, Usage{Input: 18, Output: 57, ReasoningReported: true}, ""},
 		// 阿里 message_start 里 input_tokens=7 不准，必须以 message_delta 的 68 为准
 		{"dashscope_messages.json", Messages, Usage{Input: 68, Output: 30}, ""},
 		{"dashscope_messages.sse", Messages, Usage{Input: 68, Output: 41}, ""},
@@ -112,6 +112,41 @@ func TestCacheNormalization(t *testing.T) {
 	resp.ObserveBody([]byte(`{"usage":{"input_tokens":100,"output_tokens":5,"input_tokens_details":{"cached_tokens":40}}}`))
 	if got, want := resp.Result(), (Usage{Input: 60, CacheRead: 40, Output: 5}); got != want {
 		t.Errorf("responses 缓存口径 = %+v，期望 %+v", got, want)
+	}
+}
+
+func TestReasoningFieldPresence(t *testing.T) {
+	cases := []struct {
+		proto Protocol
+		body  string
+		want  Usage
+	}{
+		{Chat, `{"usage":{"prompt_tokens":10,"completion_tokens":5}}`, Usage{Input: 10, Output: 5}},
+		{Chat, `{"usage":{"prompt_tokens":10,"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":null}}}`, Usage{Input: 10, Output: 5}},
+		{Chat, `{"usage":{"prompt_tokens":10,"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":0}}}`, Usage{Input: 10, Output: 5, ReasoningReported: true}},
+		{Chat, `{"usage":{"prompt_tokens":10,"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":7}}}`, Usage{Input: 10, Output: 5, Reasoning: 7, ReasoningReported: true}},
+		{Responses, `{"usage":{"input_tokens":10,"output_tokens":5}}`, Usage{Input: 10, Output: 5}},
+		{Responses, `{"usage":{"input_tokens":10,"output_tokens":5,"output_tokens_details":{"reasoning_tokens":null}}}`, Usage{Input: 10, Output: 5}},
+		{Responses, `{"usage":{"input_tokens":10,"output_tokens":5,"output_tokens_details":{"reasoning_tokens":0}}}`, Usage{Input: 10, Output: 5, ReasoningReported: true}},
+		{Responses, `{"usage":{"input_tokens":10,"output_tokens":5,"output_tokens_details":{"reasoning_tokens":7}}}`, Usage{Input: 10, Output: 5, Reasoning: 7, ReasoningReported: true}},
+	}
+	for _, c := range cases {
+		tr := NewTracker(c.proto)
+		tr.ObserveBody([]byte(c.body))
+		if got := tr.Result(); got != c.want {
+			t.Errorf("%s %s => %+v，期望 %+v", c.proto, c.body, got, c.want)
+		}
+	}
+
+	chat := NewTracker(Chat)
+	chat.ObserveEvent([]byte(`{"type":"usage","usage":{"prompt_tokens":10,"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":0}}}`))
+	if got := chat.Result(); !got.ReasoningReported || got.Reasoning != 0 {
+		t.Errorf("chat SSE 显式零 => %+v", got)
+	}
+	resp := NewTracker(Responses)
+	resp.ObserveEvent([]byte(`{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"output_tokens":5,"output_tokens_details":{"reasoning_tokens":7}}}}`))
+	if got := resp.Result(); !got.ReasoningReported || got.Reasoning != 7 {
+		t.Errorf("responses SSE 正值 => %+v", got)
 	}
 }
 

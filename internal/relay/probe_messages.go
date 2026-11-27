@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -148,6 +149,21 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 	}
 
 	tracker := usage.NewTracker(usage.Messages)
+	qualityReasoning := req.Item == "reasoning" && req.DisguiseSet && req.FullDisguise
+	type thinkingDetails struct {
+		ThinkingTokens *int64 `json:"thinking_tokens"`
+	}
+	type messageUsage struct {
+		OutputTokensDetails thinkingDetails `json:"output_tokens_details"`
+	}
+	setThinking := func(details thinkingDetails) {
+		if tokens := details.ThinkingTokens; tokens != nil {
+			c.ReasoningReported = true
+			if qualityReasoning || *tokens > 0 {
+				c.ReasoningTokens = *tokens
+			}
+		}
+	}
 	var text strings.Builder
 	type block struct {
 		kind, name, signature string
@@ -182,11 +198,7 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 				PartialJSON string `json:"partial_json"`
 				StopReason  string `json:"stop_reason"`
 			} `json:"delta"`
-			Usage struct {
-				OutputTokensDetails struct {
-					ThinkingTokens int64 `json:"thinking_tokens"`
-				} `json:"output_tokens_details"`
-			} `json:"usage"`
+			Usage messageUsage `json:"usage"`
 			Error struct {
 				Type    string `json:"type"`
 				Message string `json:"message"`
@@ -205,6 +217,7 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 				c.UsageFields = append(c.UsageFields, k)
 			}
 			sort.Strings(c.UsageFields)
+			// message_start 里的用量是开头的占位值（输出还没生成），推理 token 以 message_delta 的最终值为准，这里不取
 		case "content_block_start":
 			b := at(ev.Index)
 			b.kind, b.name, b.signature = ev.ContentBlock.Type, ev.ContentBlock.Name, ev.ContentBlock.Signature
@@ -225,9 +238,7 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 			if ev.Delta.StopReason != "" {
 				c.FinishReason = ev.Delta.StopReason
 			}
-			if t := ev.Usage.OutputTokensDetails.ThinkingTokens; t > 0 {
-				c.ReasoningTokens = t
-			}
+			setThinking(ev.Usage.OutputTokensDetails)
 		case "message_stop":
 			c.Done = true
 		case "error": // 已经回了 200 再在流里报错（上下文超长、过载等）：算请求失败，不当成模型答错
@@ -239,15 +250,51 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 		for {
 			ev, err := reader.Next()
 			if err != nil {
+				if qualityReasoning && c.Error == "" && !errors.Is(err, io.EOF) {
+					c.Error = "读取流失败: " + err.Error()
+				}
 				break
 			}
 			c.Events++
 			tracker.ObserveEvent(ev.Data)
 			parse(ev.Data)
 		}
-	} else { // 要了流式却回了整段 JSON：只取用量，事件序列为空，协议规范项会指出
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		if qualityReasoning && !c.Done && c.Error == "" {
+			c.Error = "流在正常结束前断开（没有 message_stop）"
+		}
+	} else {
+		b, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		if qualityReasoning && err != nil {
+			c.Error = "读取响应失败: " + err.Error()
+		}
 		tracker.ObserveBody(b)
+		var body struct {
+			ID         string `json:"id"`
+			Model      string `json:"model"`
+			StopReason string `json:"stop_reason"`
+			Content    []struct {
+				Type      string `json:"type"`
+				Text      string `json:"text"`
+				Signature string `json:"signature"`
+			} `json:"content"`
+			Usage messageUsage `json:"usage"`
+		}
+		if json.Unmarshal(b, &body) == nil {
+			setThinking(body.Usage.OutputTokensDetails)
+			if qualityReasoning {
+				c.ID, c.Model, c.FinishReason = body.ID, body.Model, body.StopReason
+				for _, content := range body.Content {
+					switch content.Type {
+					case "thinking":
+						if content.Signature != "" {
+							c.SignedThinking++
+						}
+					case "text":
+						text.WriteString(content.Text)
+					}
+				}
+			}
+		}
 	}
 	c.TotalMS = int(time.Since(start).Milliseconds())
 	c.Text = text.String()

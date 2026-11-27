@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -25,6 +26,27 @@ const maxRunningProbes = 5
 type probeView struct {
 	store.ProbeRun
 	Progress *[2]int `json:"progress,omitempty"` // 进行中：已完成 / 总请求数
+}
+
+// probeSessionIDs 按检测里的会话编号懒建 UUID；重试同一个编号时复用同一个 UUID。
+type probeSessionIDs struct {
+	mu  sync.Mutex
+	ids map[int]string
+}
+
+func newProbeSessionIDs() *probeSessionIDs {
+	return &probeSessionIDs{ids: make(map[int]string, probe.Sessions)}
+}
+
+func (p *probeSessionIDs) get(index int) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if id, ok := p.ids[index]; ok {
+		return id
+	}
+	id := relay.NewProbeSession()
+	p.ids[index] = id
+	return id
 }
 
 func (s *Server) withProgress(r store.ProbeRun) probeView {
@@ -193,11 +215,8 @@ func (s *Server) runProbe(run store.ProbeRun, ch *store.Channel) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	// 一次检测用几个会话编号：号池按会话路由，多个会话才能抽查到不同的上游
-	sessions := make([]string, probe.Sessions)
-	for i := range sessions {
-		sessions[i] = relay.NewProbeSession()
-	}
+	// 号池按会话路由：0–3 仍是一次检测的基础会话，质量推理题每题另用一个编号；同一编号重试复用同一 UUID。
+	sessions := newProbeSessionIDs()
 	// 这个渠道不支持推理强度 none 时，后面的请求直接用 low，免得几百道指纹题每道都先失败一次。
 	// 明确返回 400 立刻认定；只是空流要几乎全军覆没（至少 5 次且占 80%）才认定——kinght 这类渠道约 7% 的流会随机断，不能因此整次降档
 	var noneUnsupported atomic.Bool
@@ -211,16 +230,17 @@ func (s *Server) runProbe(run store.ProbeRun, ch *store.Channel) {
 		protocolName = "messages"
 	}
 	caller := func(ctx context.Context, req probe.Request) probe.Call {
+		session := sessions.get(req.Session)
 		if probe.IsProtocolModel(run.Baseline) {
-			return s.Relay.ProbeMessages(ctx, ch, run.UpstreamModel, sessions[req.Session%len(sessions)], req)
+			return s.Relay.ProbeMessages(ctx, ch, run.UpstreamModel, session, req)
 		}
 		if req.Effort == "none" && noneUnsupported.Load() {
 			req.Effort = "low"
-			c := gpt(ctx, ch, run.UpstreamModel, sessions[req.Session%len(sessions)], req)
+			c := gpt(ctx, ch, run.UpstreamModel, session, req)
 			c.EffortSent = "low"
 			return c
 		}
-		c := gpt(ctx, ch, run.UpstreamModel, sessions[req.Session%len(sessions)], req)
+		c := gpt(ctx, ch, run.UpstreamModel, session, req)
 		if req.Effort == "none" {
 			tried := noneTried.Add(1)
 			switch c.NoneRejectedBy {

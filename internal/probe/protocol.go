@@ -183,11 +183,7 @@ func (p *plan) buildProtocolFingerprint() {
 
 func (p *plan) buildProtocolQuality() {
 	p.buildQualityTokens()
-	for _, k := range []string{"recurrence_hard", []string{"lattice_hard", "subset_mod", "digit_sum"}[p.rng.IntN(3)]} {
-		prob := NewMathProblem(k, p.rng)
-		p.math = append(p.math, prob)
-		p.spread(Request{Item: "reasoning", Prompt: prob.Question, Effort: "high", MaxTokens: 16000})
-	}
+	p.buildQualityReasoning()
 	cities := []string{"Reykjavik", "Montevideo", "Ljubljana", "Windhoek", "Valparaiso", "Hobart", "Tromso", "Cusco"}
 	p.city = cities[p.rng.IntN(len(cities))]
 	p.spread(Request{Item: "tool", MaxTokens: 512, Prompt: fmt.Sprintf("What is the weather in %s right now? Use the tool.", p.city),
@@ -236,7 +232,11 @@ func (p *plan) reportProtocol(calls []Call) *Report {
 		fp, hint, nearest = p.judgeFingerprint(by["fingerprint"])
 		r.Items = append(r.Items, fp)
 	}
-	r.Items = append(r.Items, p.judgeThinking(by["reasoning"], base))
+	if p.legacy {
+		r.Items = append(r.Items, p.judgeThinking(by["reasoning"], base))
+	} else {
+		r.Items = append(r.Items, p.judgeQualityReasoning(by["reasoning"], base))
+	}
 	tool := p.judgeStructured(nil, by["tool"])
 	tool.Key, tool.Title = "tool", "工具调用"
 	if tool.Status == Warn { // judgeStructured 按 json_schema 和工具两项算，这里只有工具一项：做对了就是通过

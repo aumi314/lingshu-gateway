@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -150,6 +151,73 @@ func TestProbeResponsesShapeAndParse(t *testing.T) {
 	}
 	if c.InputTokens != 120 || c.CachedTokens != 100 || c.OutputTokens != 50 || c.ReasoningTokens != 30 {
 		t.Errorf("用量 %+v", c)
+	}
+	if !c.ReasoningReported {
+		t.Errorf("response.completed 带 reasoning_tokens 时应记推理用量可核验: %+v", c)
+	}
+}
+
+// 推理用量字段的四种情况：缺失、null、0、正值。测试用内存响应替身，不开端口。
+func TestProbeResponsesReasoningFieldPresence(t *testing.T) {
+	usageJSON := func(field string) string {
+		if field == "" {
+			return `{"input_tokens":10,"output_tokens":5}`
+		}
+		return `{"input_tokens":10,"output_tokens":5,"output_tokens_details":{"reasoning_tokens":` + field + `}}`
+	}
+	cases := []struct {
+		name   string
+		field  string
+		report bool
+		value  int64
+	}{
+		{"json-missing", "", false, 0},
+		{"json-null", "null", false, 0},
+		{"json-zero", "0", true, 0},
+		{"json-positive", "7", true, 7},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"id":"r","model":"m","status":"completed","output":[],"usage":%s}`, usageJSON(c.field))
+			h := fakeProbeHandler(fakeProbeClient{contentType: "application/json", body: body})
+			call := h.ProbeResponses(context.Background(), &store.Channel{BaseURLResponses: "http://up.invalid", APIKey: "k"}, "m", "s", probe.Request{Prompt: "hi"})
+			if call.ReasoningReported != c.report || call.ReasoningTokens != c.value {
+				t.Errorf("%s => %+v，期望 report=%v value=%d", c.name, call, c.report, c.value)
+			}
+		})
+	}
+
+	sseCases := []struct {
+		name   string
+		field  string
+		report bool
+		value  int64
+	}{
+		{"sse-missing", "", false, 0},
+		{"sse-null", "null", false, 0},
+		{"sse-zero", "0", true, 0},
+		{"sse-positive", "7", true, 7},
+	}
+	for _, c := range sseCases {
+		t.Run(c.name, func(t *testing.T) {
+			body := fmt.Sprintf("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"model\":\"m\",\"status\":\"completed\",\"output\":[],\"usage\":%s}}\n\n", usageJSON(c.field))
+			h := fakeProbeHandler(fakeProbeClient{contentType: "text/event-stream", body: body})
+			call := h.ProbeResponses(context.Background(), &store.Channel{BaseURLResponses: "http://up.invalid", APIKey: "k"}, "m", "s", probe.Request{Prompt: "hi"})
+			if call.Error != "" || !call.Done || call.ReasoningReported != c.report || call.ReasoningTokens != c.value {
+				t.Errorf("%s => %+v，期望 report=%v value=%d", c.name, call, c.report, c.value)
+			}
+		})
+	}
+}
+
+// 上游发 response.incomplete 时即便带半截文本，FinishReason 也固定为 incomplete；判定侧按终止状态算没测成。
+func TestProbeResponsesIncompleteIsUnmeasured(t *testing.T) {
+	body := "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"42\"}\n\n" +
+		"event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"r\",\"model\":\"m\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"42\"}]}]}}\n\n"
+	h := fakeProbeHandler(fakeProbeClient{contentType: "text/event-stream", body: body})
+	call := h.ProbeResponses(context.Background(), &store.Channel{BaseURLResponses: "http://up.invalid", APIKey: "k"}, "m", "s", probe.Request{Prompt: "hi", Item: "reasoning", DisguiseSet: true, FullDisguise: true})
+	if call.Done || call.FinishReason != "incomplete" || call.Text != "42" {
+		t.Errorf("response.incomplete 应算没测成: %+v", call)
 	}
 }
 

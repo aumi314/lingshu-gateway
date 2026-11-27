@@ -26,6 +26,8 @@ type Usage struct {
 	CacheWrite int64
 	Output     int64
 	Reasoning  int64 // 仅供展示，已包含在 Output 里
+	// ReasoningReported 表示上游明确给了推理 token 字段（null 不算）；0 和正值都算报告了。
+	ReasoningReported bool
 }
 
 // Tracker 逐个观察响应体或 SSE 事件，记录各字段最后出现的值。
@@ -228,6 +230,7 @@ func (t *Tracker) ObserveEvent(data []byte) {
 func (t *Tracker) Result() Usage {
 	f := t.fields
 	var u Usage
+	_, u.ReasoningReported = f["reasoning"]
 	switch t.proto {
 	case Chat:
 		u.CacheRead = f["cached"]

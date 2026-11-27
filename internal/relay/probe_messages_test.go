@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -101,11 +102,166 @@ func TestProbeMessagesDisguiseAndParse(t *testing.T) {
 	if c.SignedThinking != 1 || c.ReasoningTokens != 377 || c.OutputTokens != 389 || c.InputTokens != 446 || !c.UsageReported {
 		t.Errorf("推理和用量 %+v", c)
 	}
+	if !c.ReasoningReported {
+		t.Errorf("thinking_tokens 出现时应记推理用量可核验: %+v", c)
+	}
+	if c.SignedThinking != 1 {
+		t.Errorf("SignedThinking 应数带非空签名的 thinking 块: %+v", c)
+	}
 	if strings.Join(c.UsageFields, ",") != "cache_creation,cache_creation_input_tokens,cache_read_input_tokens,inference_geo,input_tokens,output_tokens,service_tier" {
 		t.Errorf("usage 字段 %v", c.UsageFields)
 	}
 	if len(c.ToolCalls) != 1 || c.ToolCalls[0].Name != "get_weather" || c.ToolCalls[0].Arguments != `{"city":"Hobart"}` {
 		t.Errorf("工具调用 %+v", c.ToolCalls)
+	}
+}
+
+// fakeProbeClient 用内存里的响应替身发请求，不开本机端口。
+type fakeProbeClient struct {
+	status      int
+	contentType string
+	body        string
+	readErr     error
+}
+
+type fakeProbeBody struct {
+	*strings.Reader
+	tailErr error
+}
+
+func (body fakeProbeBody) Close() error { return nil }
+
+func (body fakeProbeBody) Read(p []byte) (int, error) {
+	n, err := body.Reader.Read(p)
+	if err == io.EOF && body.tailErr != nil {
+		return n, body.tailErr
+	}
+	return n, err
+}
+
+type fakeProbeRoundTripper struct{ response fakeProbeClient }
+
+func (rt fakeProbeRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	status := rt.response.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	return &http.Response{
+		StatusCode: status,
+		Header:     http.Header{"Content-Type": []string{rt.response.contentType}},
+		Body:       fakeProbeBody{Reader: strings.NewReader(rt.response.body), tailErr: rt.response.readErr},
+		Request:    req,
+	}, nil
+}
+
+func fakeProbeHandler(response fakeProbeClient) *Handler {
+	return &Handler{Client: &http.Client{Transport: fakeProbeRoundTripper{response: response}}}
+}
+
+// 推理用量四种情况（缺失、null、0、正值）在 SSE 的 message_delta 和整段 JSON 里都要区分；null 不算报告。
+func TestProbeMessagesReasoningFieldPresence(t *testing.T) {
+	start := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"m\",\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n"
+	delta := func(usage string) string {
+		return "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":" + usage + "}\n\n" +
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	}
+	qualityReq := probe.Request{Prompt: "hi", Item: "reasoning", DisguiseSet: true, FullDisguise: true}
+	cases := []struct {
+		name   string
+		wire   string
+		usage  string
+		report bool
+		value  int64
+	}{
+		{"sse-missing", "sse", `{"output_tokens":5}`, false, 0},
+		{"sse-null", "sse", `{"output_tokens":5,"output_tokens_details":{"thinking_tokens":null}}`, false, 0},
+		{"sse-zero", "sse", `{"output_tokens":5,"output_tokens_details":{"thinking_tokens":0}}`, true, 0},
+		{"sse-positive", "sse", `{"output_tokens":5,"output_tokens_details":{"thinking_tokens":9}}`, true, 9},
+		{"json-missing", "json", `{"output_tokens":5}`, false, 0},
+		{"json-null", "json", `{"output_tokens":5,"output_tokens_details":{"thinking_tokens":null}}`, false, 0},
+		{"json-zero", "json", `{"output_tokens":5,"output_tokens_details":{"thinking_tokens":0}}`, true, 0},
+		{"json-positive", "json", `{"output_tokens":5,"output_tokens_details":{"thinking_tokens":9}}`, true, 9},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			contentType, body := "application/json", `{"id":"m","model":"m","stop_reason":"end_turn","content":[{"type":"thinking","signature":"sig"},{"type":"text","text":"42"}],"usage":`+c.usage+`}`
+			if c.wire == "sse" {
+				contentType, body = "text/event-stream", start+delta(c.usage)
+			}
+			h := fakeProbeHandler(fakeProbeClient{contentType: contentType, body: body})
+			call := h.ProbeMessages(context.Background(), &store.Channel{BaseURLMessages: "http://up.invalid", APIKey: "k"}, "m", "s", qualityReq)
+			if call.ReasoningReported != c.report || call.ReasoningTokens != c.value {
+				t.Errorf("%s => %+v，期望 report=%v value=%d", c.name, call, c.report, c.value)
+			}
+			if c.wire == "sse" && (call.Error != "" || !call.Done) {
+				t.Errorf("%s: SSE 应正常结束: %+v", c.name, call)
+			}
+			if c.wire == "json" && (call.Error != "" || call.Done || call.FinishReason != "end_turn" || call.Text != "42" || call.SignedThinking != 1) {
+				t.Errorf("%s: 完整 JSON 应保留回答和签名: %+v", c.name, call)
+			}
+		})
+	}
+}
+
+func TestProbeChatReasoningFieldPresence(t *testing.T) {
+	for _, test := range []struct {
+		field    string
+		reported bool
+		tokens   int64
+	}{{"", false, 0}, {"null", false, 0}, {"0", true, 0}, {"7", true, 7}} {
+		for _, stream := range []bool{false, true} {
+			stats := `"completion_tokens":5`
+			if test.field != "" {
+				stats += `,"completion_tokens_details":{"reasoning_tokens":` + test.field + `}`
+			}
+			body := `{"choices":[{"finish_reason":"stop","message":{"content":"42"}}],"usage":{` + stats + `}}`
+			contentType := "application/json"
+			if stream {
+				body, contentType = "data: "+body+"\n\ndata: [DONE]\n\n", "text/event-stream"
+			}
+			handler := fakeProbeHandler(fakeProbeClient{contentType: contentType, body: body})
+			call := handler.ProbeChat(context.Background(), &store.Channel{BaseURLChat: "http://up.invalid"}, "m", "s", probe.Request{Prompt: "hi"})
+			if call.Error != "" || call.ReasoningReported != test.reported || call.ReasoningTokens != test.tokens {
+				t.Errorf("stream %v, field %q, call %+v", stream, test.field, call)
+			}
+		}
+	}
+}
+
+// Chat 遇到 wire 读取失败时给 Call 记错，即使响应看起来有结束标记和用量。
+func TestProbeChatPartialReadIsError(t *testing.T) {
+	h := fakeProbeHandler(fakeProbeClient{
+		contentType: "text/event-stream",
+		body:        "data: {\"id\":\"c\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"42\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+		readErr:     errors.New("unexpected EOF"),
+	})
+	call := h.ProbeChat(context.Background(), &store.Channel{BaseURLChat: "http://up.invalid", APIKey: "k"}, "m", "s", probe.Request{Prompt: "hi", Item: "reasoning", DisguiseSet: true, FullDisguise: true})
+	if call.Error == "" || !strings.Contains(call.Error, "unexpected EOF") || !call.Done || call.FinishReason != "stop" || call.Text != "42" {
+		t.Errorf("wire 读取失败应记错、保留原始结束原因和文本: %+v", call)
+	}
+}
+
+// quality reasoning 的流即使带 stop_reason，没收到 [DONE] 也算没测成；整段 JSON 不走这条规则。
+func TestProbeChatMissingDoneIsErrorForQualityReasoning(t *testing.T) {
+	body := "data: {\"id\":\"c\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"42\"},\"finish_reason\":\"stop\"}]}\n\n"
+	for _, c := range []struct {
+		name    string
+		req     probe.Request
+		wantErr bool
+	}{
+		{"quality", probe.Request{Prompt: "hi", Item: "reasoning", DisguiseSet: true, FullDisguise: true}, true},
+		{"legacy", probe.Request{Prompt: "hi"}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := fakeProbeHandler(fakeProbeClient{contentType: "text/event-stream", body: body})
+			call := h.ProbeChat(context.Background(), &store.Channel{BaseURLChat: "http://up.invalid", APIKey: "k"}, "m", "s", c.req)
+			if (call.Error != "") != c.wantErr {
+				t.Errorf("%s: error = %q, wantErr = %v", c.name, call.Error, c.wantErr)
+			}
+			if call.FinishReason != "stop" || call.Text != "42" {
+				t.Errorf("原始结束原因和文本应保留: %+v", call)
+			}
+		})
 	}
 }
 
@@ -238,5 +394,23 @@ func TestProbeMessagesTransportDisguise(t *testing.T) {
 	}
 	if got["max_tokens"] != float64(1024) {
 		t.Errorf("max_tokens = %v, want 1024", got["max_tokens"])
+	}
+}
+
+// message_start 里的 thinking_tokens 是占位的 0，最终值在 message_delta；只在开头出现 0 时不能当成“明确报了 0”。
+func TestProbeMessagesThinkingZeroOnlyInStart(t *testing.T) {
+	sse := strings.Replace(probeMessagesSSE, `"output_tokens":1,`, `"output_tokens":1,"output_tokens_details":{"thinking_tokens":0},`, 1)
+	sse = strings.Replace(sse, `,"output_tokens_details":{"thinking_tokens":377}`, ``, 1)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, sse)
+	}))
+	defer up.Close()
+	d, _ := LoadProbeDisguise(writeDisguise(t, testDisguise))
+	h := &Handler{Client: up.Client(), Disguise: d}
+	c := h.ProbeMessages(context.Background(), &store.Channel{BaseURLMessages: up.URL, APIKey: "k"}, "claude-opus-5-5", "s",
+		probe.Request{Item: "reasoning", Prompt: "x", Effort: "high", DisguiseSet: true, FullDisguise: true})
+	if c.ReasoningReported {
+		t.Errorf("只有开头占位的 0，不应算报了推理用量: %+v", c)
 	}
 }
