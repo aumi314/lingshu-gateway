@@ -697,6 +697,7 @@ func (p *plan) report(calls []Call) *Report {
 	r.Observations = disguiseInjection(observe(calls, anchors, by["anchor"], base, sessionNearest), p.spec)
 	if !p.legacy {
 		r.Observations = qualityObservations(r.Observations)
+		scoreInjection(r, p.spec)
 	}
 	r.Metrics = metrics(calls)
 	finalize(r, hint)
@@ -767,6 +768,25 @@ var templateBases = map[string]int{
 
 // disguiseInjection：完整伪装下基准请求本身带着客户端的系统提示和工具（约 1–3 万 token），改和同一模板下的官方基准比；
 // 模板没标定时只作参考。“部分短请求多出一大截”（各请求之间比）照常报需关注。
+// injectionFailExtra：完整伪装下基准请求比官方同模板多出这么多 token 就判不达标。
+// 每个请求都多收这一截输入费（2026-11-28 超超多约 1.88 万）；几百以内可能是上游加了一句提示，只标需关注。
+const injectionFailExtra = 1000
+
+// scoreInjection 把完整伪装下已和官方基准比过的注入项从“请求质量”挪进计分的检测项（2026-11-28 用户要求注入计分）；
+// 模板没标定等只作参考的（Info）留在请求质量里。
+func scoreInjection(r *Report, spec Spec) {
+	if !spec.Disguise {
+		return
+	}
+	for i, o := range r.Observations {
+		if o.Key == "injection" && (o.Status == Pass || o.Status == Warn || o.Status == Fail) {
+			r.Items = append(r.Items, o)
+			r.Observations = append(r.Observations[:i:i], r.Observations[i+1:]...)
+			return
+		}
+	}
+}
+
 func disguiseInjection(obs []Item, spec Spec) []Item {
 	if !spec.Disguise {
 		return obs
@@ -787,6 +807,8 @@ func disguiseInjection(obs []Item, spec Spec) []Item {
 			obs[i].Status, obs[i].Summary = Info, fmt.Sprintf("完整伪装下基准请求共 %d 个输入 token；这个伪装模板（%s）的官方基准还没标定，只作参考", anchor, spec.Template)
 		case abs(anchor-int64(base)) <= 150:
 			obs[i].Status, obs[i].Summary = Pass, fmt.Sprintf("完整伪装下基准请求 %d 个输入 token，和官方同模板环境（%d）一致，没有额外注入", anchor, base)
+		case anchor > int64(base)+injectionFailExtra:
+			obs[i].Status, obs[i].Summary = Fail, fmt.Sprintf("完整伪装下基准请求 %d 个输入 token，比官方同模板环境（%d）多约 %d：上游每个请求都额外注入了大段内容，这部分按输入计费", anchor, base, anchor-int64(base))
 		case anchor > int64(base):
 			obs[i].Status, obs[i].Summary = Warn, fmt.Sprintf("完整伪装下基准请求 %d 个输入 token，比官方同模板环境（%d）多约 %d：上游额外注入了内容，这部分按输入计费", anchor, base, anchor-int64(base))
 		default:
@@ -796,7 +818,7 @@ func disguiseInjection(obs []Item, spec Spec) []Item {
 			obs[i].Details["official_template_tokens"] = base
 		}
 		obs[i].Summary += extra
-		if extra != "" && obs[i].Status != Warn {
+		if extra != "" && obs[i].Status != Warn && obs[i].Status != Fail {
 			obs[i].Status = Warn
 		}
 	}
