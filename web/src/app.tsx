@@ -1,6 +1,8 @@
 // 全局状态：当前用户、偏好（语言 / 货币 / 主题）、汇率，以及据此生成的翻译和金额格式化函数。
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { flushSync } from 'react-dom'
 import { get, put, type Preferences, type User } from './api'
+import { prefersReducedMotion } from './motion'
 
 type Lang = 'zh' | 'en'
 type Currency = 'USD' | 'CNY'
@@ -88,7 +90,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const setPref = useCallback(
     async (p: Preferences) => {
       const next = { ...prefs, ...p }
-      setPrefs(next) // 先生效，再保存
+      // 换主题、换语言时整页交叉淡化（motion.css），浏览器不支持或要求减少动态效果时直接切换
+      const swapsPage = (p.theme && p.theme !== prefs.theme) || (p.language && p.language !== prefs.language)
+      if (swapsPage && document.startViewTransition && !prefersReducedMotion()) {
+        document.startViewTransition(() => flushSync(() => setPrefs(next)))
+      } else {
+        setPrefs(next) // 先生效，再保存
+      }
       localStorage.setItem(LOCAL_KEY, JSON.stringify(next))
       if (user) await put('/api/me/preferences', p)
     },

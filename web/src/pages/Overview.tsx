@@ -124,20 +124,25 @@ export default function Overview() {
           extra={allDone
             ? <Button type="link" size="small" onClick={() => setShowSteps((v) => !v)}>{showSteps ? t('收起', 'Hide') : t('查看步骤', 'Show steps')}</Button>
             : <Typography.Text type="secondary">{t(`已完成 ${doneCount}/${steps.length}`, `${doneCount}/${steps.length} done`)}</Typography.Text>}
-          styles={allDone && !showSteps ? { body: { display: 'none' } } : undefined}
+          classNames={{ body: 'card-body-flush' }}
         >
-          <Space direction="vertical" size={14} style={{ width: '100%' }}>
-            {steps.map((s, i) => (
-              <div key={i} className="guide-step">
-                <span className={`guide-step-mark${s.done ? ' done' : ''}`}>{s.done ? <CheckCircleFilled /> : i + 1}</span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <Typography.Text strong={!s.done} type={s.done ? 'secondary' : undefined}>{s.title}</Typography.Text>
-                  <div className="muted">{s.detail}</div>
-                </div>
-                {!s.done && s.action}
-              </div>
-            ))}
-          </Space>
+          {/* 收起展开走高度过渡，不是一帧里消失 */}
+          <div className="ls-collapse" data-open={!allDone || showSteps}>
+            <div>
+              <Space direction="vertical" size={14} className="card-body-pad" style={{ width: '100%' }}>
+                {steps.map((s, i) => (
+                  <div key={i} className="guide-step">
+                    <span className={`guide-step-mark${s.done ? ' done' : ''}`}>{s.done ? <CheckCircleFilled /> : i + 1}</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <Typography.Text strong={!s.done} type={s.done ? 'secondary' : undefined}>{s.title}</Typography.Text>
+                      <div className="muted">{s.detail}</div>
+                    </div>
+                    {!s.done && s.action}
+                  </div>
+                ))}
+              </Space>
+            </div>
+          </div>
         </Card>
       )}
 

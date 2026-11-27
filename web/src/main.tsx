@@ -25,6 +25,8 @@ import Pricing from './pages/admin/Pricing'
 import Channels from './pages/admin/Channels'
 import Probes from './pages/admin/Probes'
 import System from './pages/admin/System'
+import { DUR, EASE_IN_OUT, EASE_OUT, useReducedMotion } from './motion'
+import './motion.css'
 import './style.css'
 
 // 页面背景跟随主题（Ant Design 只管组件，不管 body）
@@ -33,6 +35,7 @@ function ThemedBody({ dark }: { dark: boolean }) {
   useEffect(() => {
     document.body.style.background = token.colorBgLayout
     document.body.style.colorScheme = dark ? 'dark' : 'light'
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light' // 给自写 CSS 区分明暗
   }, [token.colorBgLayout, dark])
   return null
 }
@@ -54,20 +57,34 @@ function LoginRoute() {
 
 function Root() {
   const { user, loading, dark, lang } = useApp()
+  const reducedMotion = useReducedMotion()
   dayjs.locale(lang === 'zh' ? 'zh-cn' : 'en')
   return (
     <ConfigProvider
       locale={lang === 'zh' ? zhCN : enUS}
       theme={{
         algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm,
-        token: { colorPrimary: '#4d6bfe', borderRadius: 8 },
+        token: {
+          colorPrimary: '#4d6bfe',
+          borderRadius: 8,
+          // 组件动效和自写的 CSS 同一套曲线与时长（motion.css）；系统要求减少动态效果时整体关掉
+          motion: !reducedMotion,
+          motionDurationFast: `${DUR.instant / 1000}s`,
+          motionDurationMid: `${DUR.fast / 1000}s`,
+          motionDurationSlow: `${DUR.base / 1000}s`,
+          motionEaseOut: EASE_OUT,
+          motionEaseInOut: EASE_IN_OUT,
+        },
       }}
+      // 点按钮不再扩散水波纹：按下的颜色变化已经是回应，波纹只是装饰
+      wave={{ disabled: true }}
     >
       <AntApp style={{ height: '100%' }}>
         <ThemedBody dark={dark} />
         {loading ? (
           <div className="center-screen">
-            <Spin size="large" />
+            {/* 会话通常几十毫秒就确认完，短于这个时间不闪一下转圈 */}
+            <Spin size="large" delay={DUR.slow} />
           </div>
         ) : (
           <Routes>
