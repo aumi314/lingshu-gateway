@@ -17,6 +17,7 @@ export default function Groups() {
   const [groups, setGroups] = useState<Group[]>([])
   const [userGroups, setUserGroups] = useState<UserGroup[]>([])
   const [loading, setLoading] = useState(true)
+  const [toggling, setToggling] = useState<number[]>([]) // 正在切换启停的分组，开关显示加载中
   const [editing, setEditing] = useState<Group | 'new' | 'new-collection' | null>(null)
   const [managingUserGroups, setManagingUserGroups] = useState(false)
   const [checkingDelete, setCheckingDelete] = useState<number | null>(null)
@@ -75,6 +76,7 @@ export default function Groups() {
   const remove = async (g: Group) => {
     try {
       await del(`/api/admin/groups/${g.id}`)
+      message.success(t('已删除', 'Deleted'))
       load()
     } catch (e) {
       message.error((e as Error).message)
@@ -150,12 +152,13 @@ export default function Groups() {
           { title: t('适用范围', 'Availability'), dataIndex: 'is_public', render: (v, g) => v
             ? <Tag color="green">{t('所有用户', 'All users')}</Tag>
             : <Space wrap><Tag color="gold">{t('指定用户分组', 'Selected user groups')}</Tag>{g.user_group_ids.map((id) => <Tag key={id}>{userGroups.find((u) => u.id === id)?.name ?? id}</Tag>)}</Space> },
-          { title: t('启用', 'Enabled'), dataIndex: 'enabled', render: (v, g) => <Switch checked={v} onChange={async (enabled) => {
+          { title: t('启用', 'Enabled'), dataIndex: 'enabled', render: (v, g) => <Switch checked={v} loading={toggling.includes(g.id)} onChange={async (enabled) => {
+            setToggling((ids) => [...ids, g.id])
             try {
               await put(`/api/admin/groups/${g.id}`, { ...g, enabled, ratio: String(g.ratio) })
               message.success(t('状态已更新', 'Status updated'))
-              load()
-            } catch (e) { message.error((e as Error).message) }
+              await load()
+            } catch (e) { message.error((e as Error).message) } finally { setToggling((ids) => ids.filter((id) => id !== g.id)) }
           }} /> },
           { title: t('说明', 'Description'), dataIndex: 'description' },
           {

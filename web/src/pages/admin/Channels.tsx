@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   App,
   Button,
@@ -57,7 +57,7 @@ let rowSeq = 1
 
 export default function Channels() {
   const { t } = useApp()
-  const { message } = App.useApp()
+  const { message, modal } = App.useApp()
   const [channels, setChannels] = useState<Channel[]>([])
   const [templates, setTemplates] = useState<ChannelTemplate[]>([])
   const [groups, setGroups] = useState<Group[]>([])
@@ -82,6 +82,7 @@ export default function Channels() {
   const [probe, setProbe] = useState<ProbeResult[]>([])
   const [saving, setSaving] = useState(false)
   const [balanceOf, setBalanceOf] = useState<Channel | null>(null)
+  const [toggling, setToggling] = useState<number[]>([]) // 正在切换启停的渠道，开关显示加载中
   const [form] = Form.useForm<FormValues>()
 
   const load = useCallback(async () => {
@@ -402,21 +403,44 @@ export default function Channels() {
   }
 
   const toggle = async (c: Channel, enabled: boolean) => {
+    setToggling((ids) => [...ids, c.id])
     try {
       await put(`/api/admin/channels/${c.id}`, { ...c, api_key: '', enabled })
-      load()
+      await load()
     } catch (e) {
       message.error((e as Error).message)
+    } finally {
+      setToggling((ids) => ids.filter((id) => id !== c.id))
     }
   }
 
   const remove = async (c: Channel) => {
     try {
       await del(`/api/admin/channels/${c.id}`)
+      message.success(t('已删除', 'Deleted'))
       load()
     } catch (e) {
       message.error((e as Error).message)
     }
+  }
+
+  // 编辑抽屉误关（点遮罩、按 Esc）会丢掉一整套地址、key 和映射：打开时记下原样，关闭时有改动就先确认
+  const snapshot = () => JSON.stringify([form.getFieldsValue(true), connectedModels, rows.map((r) => [r.upstream, r.model_id]), keyRows])
+  const baseline = useRef('')
+  useEffect(() => {
+    if (editing !== null) baseline.current = snapshot()
+  }, [editing]) // 只在打开时记一次
+  const closeEditor = () => {
+    if (saving) return
+    if (snapshot() === baseline.current) return setEditing(null)
+    modal.confirm({
+      title: t('放弃未保存的修改？', 'Discard unsaved changes?'),
+      content: t('关闭后这次对渠道的改动不会保存。', 'Your changes to this channel will not be saved.'),
+      okText: t('放弃修改', 'Discard'),
+      okButtonProps: { danger: true },
+      cancelText: t('继续编辑', 'Keep editing'),
+      onOk: () => setEditing(null),
+    })
   }
 
   const protocols = (c: Pick<Channel, 'template' | 'base_url_chat' | 'base_url_messages' | 'base_url_responses' | 'base_url_systemone'>) =>
@@ -442,8 +466,8 @@ export default function Channels() {
       </Space>
       <Typography.Paragraph type="secondary">
         {t(
-          '渠道就是一个上游厂商的地址 + key。同一模型挂多个渠道时，先用优先级最高的，同优先级随机分流，失败自动换下一个。连续失败的渠道会暂停 5 分钟。左侧把手可以拖动调整列表顺序，只影响显示，不影响优先级。',
-          'A channel is an upstream endpoint plus key. When several channels serve a model, the highest priority is used first, ties are load-balanced, and failures fall over automatically. Channels that keep failing are paused for 5 minutes. Drag the handle to reorder the list — display only, not priority.',
+          '渠道就是一个上游厂商的地址 + key。同一模型挂多个渠道时，先用优先级最高的，同优先级内同一段对话固定用同一个渠道（保住提示词缓存），失败自动换下一个。连续失败的渠道会暂停 5 分钟。左侧把手可以拖动调整列表顺序，只影响显示，不影响优先级。',
+          'A channel is an upstream endpoint plus key. When several channels serve a model, the highest priority is used first; within a priority each conversation sticks to one channel (to keep prompt caches), and failures fall over automatically. Channels that keep failing are paused for 5 minutes. Drag the handle to reorder the list — display only, not priority.',
         )}
       </Typography.Paragraph>
       <SortableBody ids={channels.map((c) => c.id)} onMove={move}>
@@ -552,7 +576,7 @@ export default function Channels() {
           {
             title: t('启用', 'Enabled'),
             render: (_, c) => (
-              <Switch size="small" checked={c.enabled} onChange={(v) => toggle(c, v)} />
+              <Switch size="small" checked={c.enabled} loading={toggling.includes(c.id)} onChange={(v) => toggle(c, v)} />
             ),
           },
         ]}
@@ -563,7 +587,7 @@ export default function Channels() {
 
       <Drawer
         open={editing !== null}
-        onClose={() => setEditing(null)}
+        onClose={closeEditor}
         size={760}
         title={editing === 'new' ? t('添加渠道', 'Add channel') : `${t('编辑渠道', 'Edit channel')} · ${editing && typeof editing === 'object' ? editing.name : ''}`}
         extra={

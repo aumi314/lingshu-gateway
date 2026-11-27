@@ -73,7 +73,7 @@ function Root() {
           <Routes>
             <Route index element={<Welcome />} />
             <Route path="login" element={<LoginRoute />} />
-            <Route path="register" element={<Register />} />
+            <Route path="register" element={user ? <Navigate to="/console" replace /> : <Register />} />
             <Route path="terms" element={<Legal kind="terms" />} />
             <Route path="privacy" element={<Legal kind="privacy" />} />
             <Route path="console" element={<RequireUser />}>

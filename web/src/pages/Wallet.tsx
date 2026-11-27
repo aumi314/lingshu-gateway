@@ -7,6 +7,9 @@ import { useApp } from '../app'
 import { paymentNames, payOrder, type OrderList, type PaymentMethod, type Topup } from '../payment'
 
 type Available = { provider: string; currency: string; min_usd: string; max_usd: string; methods: PaymentMethod[] }
+// 订单状态的说法：表格和顶部提示用同一套
+const statusLabel = (t: (zh: string, en: string) => string, s: string) =>
+  s === 'success' ? t('成功', 'Success') : s === 'failed' ? t('失败', 'Failed') : s === 'expired' ? t('已过期', 'Expired') : t('待付款确认', 'Pending')
 
 export default function Wallet() {
   const { user, money, t, reload } = useApp()
@@ -21,6 +24,7 @@ export default function Wallet() {
   const [quote, setQuote] = useState<Topup | null>(null)
   const [focused, setFocused] = useState<Topup | null>(null)
   const [busy, setBusy] = useState(false)
+  const [checking, setChecking] = useState('') // 正在核对的订单，只让这一行的按钮转圈
   const [requestKey, setRequestKey] = useState(() => crypto.randomUUID())
   const provider = Form.useWatch('provider', { form, preserve: true })
   const selected = methods.find((m) => m.provider === provider)
@@ -45,7 +49,8 @@ export default function Wallet() {
     const poll = () => get<Topup>(`/api/me/topups/${encodeURIComponent(orderID)}`).then((o) => {
       if (!active) return
       setFocused(o)
-      if (o.status === 'success') { window.clearInterval(timer); reload(); loadOrders() }
+      if (o.status !== 'pending') window.clearInterval(timer) // 有结果了就不用再查
+      if (o.status === 'success') { reload(); loadOrders() }
     }).catch(() => {})
     poll()
     post<{ order: Topup }>(`/api/me/topups/${encodeURIComponent(orderID)}/refresh`).then((v) => { if (active) { setFocused(v.order); reload(); loadOrders() } }).catch(() => {})
@@ -57,12 +62,19 @@ export default function Wallet() {
     setBusy(true)
     try { await fn() } catch (e) { message.error((e as Error).message) } finally { setBusy(false) }
   }
-  const refresh = (id: string) => run(async () => {
-    const v = await post<{ order: Topup; message?: string }>(`/api/me/topups/${id}/refresh`)
-    setFocused(v.order)
-    if (v.message) message.info(v.message)
-    await reload(); await loadOrders()
-  })
+  const refresh = async (id: string) => {
+    setChecking(id)
+    try {
+      const v = await post<{ order: Topup; message?: string }>(`/api/me/topups/${id}/refresh`)
+      setFocused(v.order)
+      if (v.message) message.info(v.message)
+      await reload(); await loadOrders()
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setChecking('')
+    }
+  }
 
   // 兑换码充值：成功后立即刷新余额
   const [redeemCode, setRedeemCode] = useState('')
@@ -99,7 +111,9 @@ export default function Wallet() {
           </Card>
         </Col>
       </Row>
-      {focused && <Alert showIcon type={focused.status === 'success' ? 'success' : 'info'} style={{ marginTop: 16 }} title={focused.status === 'success' ? t('充值已完成', 'Top-up completed') : t('正在核对付款状态，请勿重复支付', 'Checking payment; please do not pay again')} description={<Space wrap><Typography.Text copyable>{focused.id}</Typography.Text><span>{focused.status}</span>{focused.environment === 'test' && <Tag>{t('测试环境，不增加真实余额', 'Test: no wallet credit')}</Tag>}<Button size="small" loading={busy} onClick={() => refresh(focused.id)}>{t('刷新状态', 'Refresh status')}</Button></Space>} />}
+      {focused && <Alert showIcon type={focused.status === 'success' ? 'success' : focused.status === 'pending' ? 'info' : 'warning'} style={{ marginTop: 16 }}
+        title={focused.status === 'success' ? t('充值已完成', 'Top-up completed') : focused.status === 'pending' ? t('正在核对付款状态，请勿重复支付', 'Checking payment; please do not pay again') : t('这笔订单没有付款成功，可以重新下单', 'This order was not paid. You can place a new one.')}
+        description={<Space wrap><Typography.Text copyable>{focused.id}</Typography.Text><span>{statusLabel(t, focused.status)}</span>{focused.environment === 'test' && <Tag>{t('测试环境，不增加真实余额', 'Test: no wallet credit')}</Tag>}{focused.status !== 'success' && <Button size="small" loading={checking === focused.id} onClick={() => refresh(focused.id)}>{t('刷新状态', 'Refresh status')}</Button>}</Space>} />}
       {redeemEnabled && <Card title={t('兑换码', 'Redeem a code')} style={{ marginTop: 16 }}>
         <Space.Compact style={{ width: '100%', maxWidth: 520 }}>
           <Input value={redeemCode} onChange={(e) => setRedeemCode(e.target.value)} onPressEnter={redeem} placeholder={t('输入兑换码，例如 ABCDE-FGHIJ-…', 'Enter a code, e.g. ABCDE-FGHIJ-…')} allowClear className="mono" />
@@ -128,9 +142,9 @@ export default function Wallet() {
           { title: t('付款报价', 'Payment quote'), render: (_, o) => `${o.amount} ${o.currency}` },
           { title: t('税费', 'Tax'), render: (_, o) => `${o.tax} ${o.currency}` },
           { title: t('实际支付合计', 'Paid total'), render: (_, o) => o.status === 'success' ? `${o.total} ${o.currency}` : '—' },
-          { title: t('状态', 'Status'), render: (_, o) => <Space><Tag color={o.status === 'success' ? 'green' : 'default'}>{o.status === 'success' ? t('成功', 'Success') : o.status === 'failed' ? t('失败', 'Failed') : o.status === 'expired' ? t('已过期', 'Expired') : t('待付款确认', 'Pending')}</Tag>{o.environment === 'test' && <Tag>test</Tag>}</Space> },
+          { title: t('状态', 'Status'), render: (_, o) => <Space><Tag color={o.status === 'success' ? 'green' : 'default'}>{statusLabel(t, o.status)}</Tag>{o.environment === 'test' && <Tag>test</Tag>}</Space> },
           { title: t('创建时间', 'Created'), dataIndex: 'created_at', render: (v) => dayjs(v).format('YYYY-MM-DD HH:mm') },
-          { title: '', render: (_, o) => o.status !== 'success' && <Space>{o.status === 'pending' && <Button size="small" onClick={() => setQuote(o)}>{t('继续付款', 'Continue payment')}</Button>}<Button size="small" loading={busy} onClick={() => refresh(o.id)}>{t('核对付款', 'Check payment')}</Button></Space> },
+          { title: '', render: (_, o) => o.status !== 'success' && <Space>{o.status === 'pending' && <Button size="small" onClick={() => setQuote(o)}>{t('继续付款', 'Continue payment')}</Button>}<Button size="small" loading={checking === o.id} onClick={() => refresh(o.id)}>{t('核对付款', 'Check payment')}</Button></Space> },
         ]} />
       </Card>
       <Modal open={!!quote} title={t('确认充值', 'Confirm top-up')} onCancel={() => { setQuote(null); setRequestKey(crypto.randomUUID()) }} okText={t('前往付款', 'Continue to payment')} confirmLoading={busy} onOk={() => quote && run(() => payOrder(quote.id))}>

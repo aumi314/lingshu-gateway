@@ -369,8 +369,13 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, proto usa
 		writeError(w, proto, http.StatusUnauthorized, "API key 无效，请检查是否复制完整")
 		return nil, false
 	}
-	if !owner.KeyEnabled || !owner.UserEnabled {
-		writeError(w, proto, http.StatusForbidden, "这个 API key 或所属账号已被停用，请联系管理员")
+	// 账号停用只能找管理员；key 是用户自己停的，告诉他去哪里重新打开
+	if !owner.UserEnabled {
+		writeError(w, proto, http.StatusForbidden, "账号已被停用，请联系管理员")
+		return nil, false
+	}
+	if !owner.KeyEnabled {
+		writeError(w, proto, http.StatusForbidden, "这个 API key 已停用，可以在控制台 API keys 页面重新启用")
 		return nil, false
 	}
 	if owner.ExpiresAt != nil && !owner.ExpiresAt.After(time.Now()) {

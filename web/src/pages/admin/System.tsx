@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Alert, App, Button, Card, Checkbox, Form, Input, InputNumber, Modal, Radio, Select, Space, Switch, Table, Tabs, Tag, Typography } from 'antd'
+import { Alert, App, Button, Card, Checkbox, Form, Input, InputNumber, Modal, Popconfirm, Radio, Select, Space, Switch, Table, Tabs, Tag, Typography } from 'antd'
 import { useSearchParams } from 'react-router-dom'
 import dayjs from 'dayjs'
 import { del, get, post, put, type Project } from '../../api'
@@ -83,6 +83,10 @@ export default function System() {
   }, [])
   const [savingCapture, setSavingCapture] = useState(false)
   const [regFlags, setRegFlags] = useState({ enabled: false, code_required: false, email_required: false })
+  // 注册方式要点保存才生效（和页面上即时生效的开关不同）：记下已保存的值，有改动时提示
+  const [savedReg, setSavedReg] = useState(regFlags)
+  const regDirty = regFlags.enabled !== savedReg.enabled || regFlags.code_required !== savedReg.code_required || regFlags.email_required !== savedReg.email_required
+  const [freezing, setFreezing] = useState<number[]>([])
   const [savingRegistration, setSavingRegistration] = useState(false)
   const [mailAccounts, setMailAccounts] = useState<MailAccount[]>([])
   const [loadingMailAccounts, setLoadingMailAccounts] = useState(false)
@@ -111,7 +115,9 @@ export default function System() {
     privacyForm.setFieldsValue({ privacy_policy: s.privacy_policy ?? '' })
     setPaymentEnabled(s.payment_enabled)
     setRedeemEnabled(s.redeem_enabled)
-    setRegFlags(normalizeRegistration({ enabled: s.registration_enabled, code_required: s.registration_code_required, email_required: s.registration_email_required, mode: s.registration_mode }))
+    const reg = normalizeRegistration({ enabled: s.registration_enabled, code_required: s.registration_code_required, email_required: s.registration_email_required, mode: s.registration_mode })
+    setRegFlags(reg)
+    setSavedReg(reg)
   }
 
   useEffect(() => {
@@ -286,11 +292,14 @@ export default function System() {
   }
 
   const freezeProject = async (p: Project, frozen: boolean) => {
+    setFreezing((ids) => [...ids, p.id])
     try {
       await put(`/api/admin/projects/${p.id}/frozen`, { frozen })
-      loadProjects()
+      await loadProjects()
     } catch (e) {
       message.error((e as Error).message)
+    } finally {
+      setFreezing((ids) => ids.filter((id) => id !== p.id))
     }
   }
 
@@ -325,6 +334,7 @@ export default function System() {
     try {
       // 关闭总开关只停掉自助入口，两个验证条件保留为偏好，下次开启时仍然生效。
       await put('/api/admin/settings', { registration_enabled: regFlags.enabled, registration_code_required: regFlags.code_required, registration_email_required: regFlags.email_required })
+      setSavedReg(regFlags)
       message.success(t('注册方式已保存', 'Registration settings saved'))
     } catch (e) {
       message.error((e as Error).message)
@@ -400,7 +410,7 @@ export default function System() {
                     { title: t('成员', 'Members'), dataIndex: 'members' },
                     { title: t('池子余额', 'Pool'), dataIndex: 'balance', render: (v) => money(v) },
                     { title: t('累计花费', 'Total spent'), render: (_, p) => money(p.total_spent) },
-                    { title: t('冻结', 'Frozen'), dataIndex: 'frozen', render: (v, p) => <Switch size="small" aria-label={`${t('冻结', 'Freeze')} · ${p.name}`} checked={v} disabled={p.closed} onChange={(c) => freezeProject(p, c)} /> },
+                    { title: t('冻结', 'Frozen'), dataIndex: 'frozen', render: (v, p) => <Switch size="small" aria-label={`${t('冻结', 'Freeze')} · ${p.name}`} checked={v} disabled={p.closed} loading={freezing.includes(p.id)} onChange={(c) => freezeProject(p, c)} /> },
                   ]}
                 />
               )}
@@ -626,7 +636,10 @@ export default function System() {
                   {!mailReady && <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>{t('开启邮箱认证前，请由超级管理员添加发信账号并检查授权。', 'Ask a super admin to add a mail account and check authorization before requiring email verification.')}</Typography.Paragraph>}
                 </>}
                 <div style={{ marginTop: 20 }}>
-                  <Button type="primary" loading={savingRegistration} disabled={loading || (regFlags.enabled && regFlags.email_required && !mailReady)} onClick={saveRegistration}>{t('保存', 'Save')}</Button>
+                  <Space wrap>
+                    <Button type="primary" loading={savingRegistration} disabled={loading || !regDirty || (regFlags.enabled && regFlags.email_required && !mailReady)} onClick={saveRegistration}>{t('保存', 'Save')}</Button>
+                    {regDirty && <Typography.Text type="warning">{t('有未保存的修改，点保存后生效', 'Unsaved changes; save to apply')}</Typography.Text>}
+                  </Space>
                 </div>
               </Card>
 
@@ -654,7 +667,7 @@ export default function System() {
                       : c.used_at ? <Tag color="green">{t('已使用', 'Used')}</Tag> : <Tag color="blue">{t('可使用', 'Available')}</Tag> },
                     { title: t('使用者', 'Used by'), dataIndex: 'used_by', render: (v) => v || '—' },
                     { title: '', align: 'right', render: (_, c) => !c.used_at && !c.revoked_at
-                      ? <Button size="small" type="link" danger onClick={() => revokeCode(c.id)}>{t('撤销', 'Revoke')}</Button>
+                      ? <Popconfirm title={t('撤销后这个注册码不能再用来注册，确定？', 'Revoke this code? It can no longer be used to register.')} onConfirm={() => revokeCode(c.id)}><Button size="small" type="link" danger>{t('撤销', 'Revoke')}</Button></Popconfirm>
                       : null },
                   ]}
                 />

@@ -86,10 +86,26 @@ export default function Users() {
     setEditingUser(null)
   }
 
+  // 点遮罩、按 Esc 或右上角关闭可能是误碰，已填的资料和余额调整会丢：有改动先确认。点「取消」是明确放弃，直接关
+  const dismissEdit = () => {
+    if (submitting) return
+    if (!editForm.isFieldsTouched() && !balanceForm.isFieldsTouched()) return closeEdit()
+    modal.confirm({
+      title: t('放弃未保存的修改？', 'Discard unsaved changes?'),
+      content: t('关闭后这次对用户的改动不会保存。', 'Your changes to this user will not be saved.'),
+      okText: t('放弃修改', 'Discard'),
+      okButtonProps: { danger: true },
+      cancelText: t('继续编辑', 'Keep editing'),
+      onOk: closeEdit,
+    })
+  }
+
   const openEdit = (u: User) => {
     if (u.role === 'super_admin' && !isSuper) return
     ++editSession.current
     setSubmitting(false)
+    editForm.resetFields() // 清掉上次编辑留下的“已改动”标记
+    balanceForm.resetFields()
     editForm.setFieldsValue({ username: u.username, password: '', note: u.note ?? '', role: u.role, user_group_ids: u.user_group_ids ?? [], enabled: u.enabled, can_create_projects: !!u.can_create_projects })
     balanceForm.setFieldsValue({ mode: 'add', amount: undefined, note: '' })
     setEditingUser(u)
@@ -229,7 +245,7 @@ export default function Users() {
       <Drawer
         open={!!editingUser}
         title={`${t('编辑用户', 'Edit user')} · ${editingUser?.username}`}
-        onClose={closeEdit}
+        onClose={dismissEdit}
         extra={
           <Space>
             <Button disabled={submitting} onClick={closeEdit}>{t('取消', 'Cancel')}</Button>
