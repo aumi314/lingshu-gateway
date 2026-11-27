@@ -19,7 +19,7 @@ const path = require('node:path')
       const req = route.request()
       const p = new URL(req.url()).pathname
       const json = (b, status = 200) => route.fulfill({ json: b, status })
-      if (p === '/api/me') return json({ user: { id: 1, username: 'admin', role: 'admin', balance: state.balance, enabled: true, user_group_ids: [1], preferences: { theme: 'dark', language: 'zh' }, created_at: '2026-10-25' }, cny_per_usd: '6.7' })
+      if (p === '/api/me') return json({ user: { id: 1, username: 'admin', role: 'admin', balance: state.balance, enabled: true, user_group_ids: [1], preferences: { theme: 'dark', language: 'zh', ...(state.currency ? { currency: state.currency } : {}) }, created_at: '2026-10-25' }, cny_per_usd: '6.7' })
       if (p === '/api/admin/settings' && req.method() === 'PUT') {
         const input = req.postDataJSON()
         state.settingsWrites.push(input)
@@ -43,7 +43,7 @@ const path = require('node:path')
       }
       if (p === '/api/me/payment-methods') {
         if (state.holdMethods) await new Promise((resolve) => { state.releaseMethods = resolve })
-        return json({ enabled: false, redeem_enabled: state.redeemEnabled, methods: [] })
+        return json({ enabled: !!state.methods, redeem_enabled: state.redeemEnabled, methods: state.methods ?? [] })
       }
       if (p === '/api/me/topups') return json({ items: [], total: 0 })
       if (p === '/api/me/logs') return json({ logs: [], summary: { requests: 0, failed: 0, input_tokens: 0, cache_read_tokens: 0, output_tokens: 0, cost: '0' } })
@@ -119,6 +119,14 @@ const path = require('node:path')
     await page.getByText('兑换成功，到账 $5.0000', { exact: true }).waitFor()
     await page.getByText('$6.0000', { exact: true }).first().waitFor()
     assert.equal(await input.inputValue(), '')
+    // 显示人民币的人：美元到账额度下面给出约合人民币，不用自己换算
+    state.currency = 'CNY'
+    state.methods = [{ provider: 'epay', currency: 'CNY', min_usd: '1', max_usd: '1000', methods: [{ id: 'alipay', name: '支付宝' }] }]
+    await page.goto('http://127.0.0.1:25188/console/wallet')
+    const credit = page.locator('#credit_usd')
+    await credit.waitFor()
+    await credit.fill('10')
+    await page.getByText('约 ¥67.00', { exact: true }).waitFor()
     console.log('PASS: redeem switch persists independently, failed saves retain state, disabled wallet hides redemption without affecting balances/payments/history, admin generates while disabled, re-enabled member redemption refreshes balance')
   } finally {
     await browser.close()

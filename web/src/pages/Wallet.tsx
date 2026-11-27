@@ -12,7 +12,7 @@ const statusLabel = (t: (zh: string, en: string) => string, s: string) =>
   s === 'success' ? t('成功', 'Success') : s === 'failed' ? t('失败', 'Failed') : s === 'expired' ? t('已过期', 'Expired') : t('待付款确认', 'Pending')
 
 export default function Wallet() {
-  const { user, money, t, reload } = useApp()
+  const { user, money, t, reload, currency, rate } = useApp()
   const { message } = App.useApp()
   const [params] = useSearchParams()
   const [form] = Form.useForm()
@@ -28,6 +28,7 @@ export default function Wallet() {
   const [requestKey, setRequestKey] = useState(() => crypto.randomUUID())
   const provider = Form.useWatch('provider', { form, preserve: true })
   const selected = methods.find((m) => m.provider === provider)
+  const creditUSD = Form.useWatch('credit_usd', form)
   const loadOrders = useCallback(() => get<OrderList>(`/api/me/topups?page=${page}`).then(setOrders), [page])
 
   useEffect(() => {
@@ -128,7 +129,9 @@ export default function Wallet() {
           <Space wrap align="start">
             <Form.Item name="provider" label={t('支付服务', 'Payment service')} rules={[{ required: true }]}><Select style={{ width: 210 }} options={methods.map((m) => ({ value: m.provider, label: paymentNames[m.provider] }))} onChange={(p) => form.setFieldValue('method', methods.find((m) => m.provider === p)?.methods[0]?.id)} /></Form.Item>
             {provider === 'epay' && <Form.Item name="method" label={t('支付方式', 'Payment method')} rules={[{ required: true }]}><Select style={{ width: 160 }} options={selected?.methods.map((m) => ({ value: m.id, label: m.name }))} /></Form.Item>}
-            <Form.Item name="credit_usd" label={t('美元到账额度（USD）', 'Wallet credit (USD)')} rules={[{ required: true }]}><InputNumber stringMode precision={2} min={selected?.min_usd} max={selected?.max_usd} prefix="$" style={{ width: 190 }} /></Form.Item>
+            <Form.Item name="credit_usd" label={t('美元到账额度（USD）', 'Wallet credit (USD)')} rules={[{ required: true }]}
+              // 习惯看人民币的人不用自己换算：按站内汇率给个约数，实际付款以下一步报价为准
+              extra={currency === 'CNY' && Number(creditUSD) > 0 ? t(`约 ¥${(Number(creditUSD) * rate).toFixed(2)}`, `≈ ¥${(Number(creditUSD) * rate).toFixed(2)}`) : undefined}><InputNumber stringMode precision={2} min={selected?.min_usd} max={selected?.max_usd} prefix="$" style={{ width: 190 }} /></Form.Item>
           </Space>
           <Typography.Paragraph type="secondary">{t('此处输入到账的美元额度。点击继续后核对实际付款金额，支付服务如收取税费，会在收银台显示。', 'Enter the USD credit you want. Continue to review the payment quote; any provider taxes are shown at checkout.')}</Typography.Paragraph>
           <Button type="primary" htmlType="submit" loading={busy}>{t('继续', 'Continue')}</Button>
