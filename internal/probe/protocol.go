@@ -264,6 +264,7 @@ func (p *plan) reportProtocol(calls []Call) *Report {
 	r.Observations = disguiseInjection(observe(calls, anchors[:min(1, len(anchors))], by["anchor"], nil, nearest), p.spec)
 	if !p.legacy {
 		r.Observations = qualityObservations(r.Observations)
+		scoreInjection(r, p.spec)
 	}
 	r.Metrics = metrics(calls)
 	finalize(r, hint)
