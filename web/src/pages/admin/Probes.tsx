@@ -134,7 +134,7 @@ export default function Probes() {
               })} />
           </Form.Item>
           <Space>
-            <Tooltip title={t('约 13–30 个请求，检查分词、推理、工具、指令、长上下文和缓存命中率', 'About 13–30 requests covering tokenization, reasoning, tools, instructions, long context and cache hit rate')}>
+            <Tooltip title={t('约 13–34 个请求，检查分词、推理、工具、指令、长上下文和缓存命中率', 'About 13–34 requests covering tokenization, reasoning, tools, instructions, long context and cache hit rate')}>
               <Button type="primary" loading={startingMode === 'quality'} disabled={!!startingMode} onClick={() => void start('quality')}>{t('渠道质量测试', 'Channel quality')}</Button>
             </Tooltip>
             <Tooltip title={t('约 390–507 个短请求，按答案分布计算型号匹配度', 'About 390–507 short requests to score model similarity from answer distributions')}>
@@ -388,9 +388,15 @@ function Details({ item }: { item: Item }) {
   if (Array.isArray(d.problems)) {
     return (
       <Space direction="vertical" size={2}>
-        {(d.problems as { kind: string; answer: number; got: string; correct: boolean; reasoning_tokens: number; baseline_reasoning?: number; baseline_correct?: string }[]).map((p, i) => (
-          <span key={i}>{p.correct ? '✓' : '✗'} {p.kind}：{t('标准答案', 'answer')} {p.answer}，{t('回答', 'got')} {short(p.got, 30) || '—'}；{t('推理', 'reasoning')} {p.reasoning_tokens}{p.baseline_correct !== undefined && <>（{t('官方中位数', 'official median')} {p.baseline_reasoning}，{t('官方答对', 'official correct')} {p.baseline_correct}）</>}</span>
-        ))}
+        {(d.problems as { kind: string; answer: number; got?: string; correct?: boolean; error?: string; session?: number; effort_sent?: string; reasoning_tokens: number; reasoning_reported?: boolean; baseline_reasoning?: number; baseline_correct?: string }[]).map((p, i) => {
+          const label = `${p.kind}${p.session === undefined ? '' : ` · ${t('会话', 'Session')} ${p.session}`}${p.effort_sent ? ` · ${p.effort_sent}` : ''}`
+          if (p.error) return <span key={i}>{label} · {t('没测成', 'Incomplete')}（{short(p.error, 80)}）</span>
+          const result = p.correct ? '✓' : p.session === undefined ? '✗' : t('答错', 'Incorrect')
+          const usage = p.reasoning_reported === false ? t('用量不可核验', 'Usage unverified')
+            : p.reasoning_reported && p.reasoning_tokens === 0 ? t('推理为 0', 'Zero reasoning tokens')
+              : `${t('推理', 'reasoning')} ${p.reasoning_tokens}`
+          return <span key={i}>{result} {label}：{t('标准答案', 'answer')} {p.answer}，{t('回答', 'got')} {short(p.got ?? '', 30) || '—'}；{usage}{p.baseline_correct !== undefined && <>（{t('官方中位数', 'official median')} {p.baseline_reasoning}，{t('官方答对', 'official correct')} {p.baseline_correct}）</>}</span>
+        })}
         {d.effort_low !== undefined && <span>{t('推理强度 low / high 的推理 token：', 'Reasoning tokens at low / high: ')}{String(d.effort_low)} / {String(d.effort_high)}</span>}
       </Space>
     )

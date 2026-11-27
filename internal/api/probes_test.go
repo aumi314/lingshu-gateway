@@ -21,10 +21,11 @@ type probeUpstream struct {
 	t      *testing.T
 	server *httptest.Server
 
-	mu       sync.Mutex
-	requests []probeUpstreamRequest
-	status   int
-	delay    time.Duration
+	mu                 sync.Mutex
+	requests           []probeUpstreamRequest
+	status             int
+	delay              time.Duration
+	retryReasoningOnce bool
 }
 
 type probeUpstreamRequest struct {
@@ -72,16 +73,25 @@ func (up *probeUpstream) serve(w http.ResponseWriter, r *http.Request) {
 	raw, _ := io.ReadAll(r.Body)
 	var body map[string]any
 	_ = json.Unmarshal(raw, &body)
+	request := probeUpstreamRequest{path: r.URL.Path, model: probeBodyModel(body), body: body, header: r.Header.Clone()}
 	up.mu.Lock()
-	up.requests = append(up.requests, probeUpstreamRequest{path: r.URL.Path, model: probeBodyModel(body), body: body, header: r.Header.Clone()})
+	up.requests = append(up.requests, request)
 	status := up.status
 	delay := up.delay
+	retry := up.retryReasoningOnce && strings.HasPrefix(outboundPrompt(request), "Let x1 = ")
+	if retry {
+		up.retryReasoningOnce = false
+	}
 	up.mu.Unlock()
 	if delay > 0 {
 		time.Sleep(delay)
 	}
 	if status != http.StatusOK {
 		http.Error(w, `{"error":{"message":"insufficient balance"}}`, status)
+		return
+	}
+	if retry {
+		http.Error(w, `{"error":{"message":"temporarily unavailable"}}`, http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -251,7 +261,7 @@ func (up *probeUpstream) assertFullDisguise(t *testing.T, ua string) {
 }
 
 // assertClaudeSession：号池要求 X-Claude-Code-Session-Id 和 metadata.user_id 里的 session_id 一致。
-func assertClaudeSession(t *testing.T, request probeUpstreamRequest) {
+func assertClaudeSession(t *testing.T, request probeUpstreamRequest) string {
 	t.Helper()
 	meta, _ := request.body["metadata"].(map[string]any)
 	userID, _ := meta["user_id"].(string)
@@ -261,6 +271,102 @@ func assertClaudeSession(t *testing.T, request probeUpstreamRequest) {
 	_ = json.Unmarshal([]byte(userID), &parsed)
 	if parsed.SessionID == "" || request.header.Get("X-Claude-Code-Session-Id") != parsed.SessionID {
 		t.Errorf("会话头 %q 应等于 metadata 的 session_id %q", request.header.Get("X-Claude-Code-Session-Id"), parsed.SessionID)
+	}
+	return parsed.SessionID
+}
+
+// assertQualityReasoningSessions：质量推理题按编号独占会话，重试仍复用同一编号的 UUID。
+func assertQualityReasoningSessions(t *testing.T, requests []probeUpstreamRequest, calls []json.RawMessage, expected int) {
+	t.Helper()
+	reasoningByPrompt := map[string]string{}
+	reasoningPrompts := map[string]int{}
+	for _, raw := range calls {
+		var call struct {
+			Item    string `json:"item"`
+			Prompt  string `json:"prompt"`
+			Session int    `json:"session"`
+		}
+		if json.Unmarshal(raw, &call) == nil && call.Item == "reasoning" {
+			if want := probe.Sessions + len(reasoningPrompts); call.Session != want {
+				t.Errorf("推理题会话编号 = %d，期望 %d", call.Session, want)
+			}
+			reasoningPrompts[call.Prompt] = call.Session
+		}
+	}
+	if len(reasoningPrompts) != expected {
+		t.Errorf("推理题应有 %d 个不同题面，实际 %d", expected, len(reasoningPrompts))
+	}
+	attempts := 0
+	for _, request := range requests {
+		prompt := strings.TrimSuffix(outboundPrompt(request), "\n\nAnswer directly; do not use any tools.")
+		if _, ok := reasoningPrompts[prompt]; !ok {
+			continue
+		}
+		attempts++
+		var session string
+		switch {
+		case strings.HasSuffix(request.path, "/responses"):
+			session = request.header.Get("Session-Id")
+			meta, _ := request.body["client_metadata"].(map[string]any)
+			if meta["session_id"] != session || request.body["prompt_cache_key"] != session || request.header.Get("Thread-Id") != session {
+				t.Errorf("Codex 会话头和请求体的会话编号不一致：%q，%v", session, meta)
+			}
+		case strings.HasSuffix(request.path, "/v1/messages"):
+			session = assertClaudeSession(t, request)
+		}
+		if previous, ok := reasoningByPrompt[prompt]; session == "" || ok && previous != session {
+			t.Errorf("题面 %q 重试时应复用会话，首次 %q，本次 %q", prompt, previous, session)
+		}
+		reasoningByPrompt[prompt] = session
+	}
+	if len(reasoningByPrompt) != len(reasoningPrompts) {
+		t.Errorf("推理题出站题面 %d 个，报告 %d 个", len(reasoningByPrompt), len(reasoningPrompts))
+	}
+	if attempts != expected+1 {
+		t.Errorf("预期一道推理题重试，发出 %d 次请求，期望 %d 次", attempts, expected+1)
+	}
+	seen := map[string]string{}
+	for prompt, session := range reasoningByPrompt {
+		if other, ok := seen[session]; ok {
+			t.Errorf("推理题应各用独立会话，%q 和 %q 都用了 %q", prompt, other, session)
+		}
+		seen[session] = prompt
+	}
+}
+
+func TestProbeSessionIDs(t *testing.T) {
+	sessions := newProbeSessionIDs()
+	seen := map[string]bool{}
+	for index := range probe.Sessions + 10 {
+		session := sessions.get(index)
+		if session == "" || seen[session] {
+			t.Fatalf("会话编号 %d 生成了重复或空的 UUID %q", index, session)
+		}
+		seen[session] = true
+		if retry := sessions.get(index); retry != session {
+			t.Fatalf("会话编号 %d 重试时 UUID 变了：%q -> %q", index, session, retry)
+		}
+	}
+}
+
+func outboundPrompt(request probeUpstreamRequest) string {
+	switch {
+	case strings.HasSuffix(request.path, "/responses"):
+		input, _ := request.body["input"].([]any)
+		if len(input) == 0 {
+			return ""
+		}
+		last, _ := input[len(input)-1].(map[string]any)
+		return probeJSONText(last["content"])
+	case strings.HasSuffix(request.path, "/v1/messages"):
+		messages, _ := request.body["messages"].([]any)
+		if len(messages) == 0 {
+			return ""
+		}
+		last, _ := messages[len(messages)-1].(map[string]any)
+		return probeJSONText(last["content"])
+	default:
+		return ""
 	}
 }
 
@@ -433,6 +539,9 @@ func TestProbeQualityGPT(t *testing.T) {
 	e := newEnv(t)
 	a := e.login("admin")
 	up := newProbeUpstream(t)
+	up.mu.Lock()
+	up.retryReasoningOnce = true
+	up.mu.Unlock()
 	channelID := seedProbeChannel(t, e, "responses", "upstream-key", "", "", up.url())
 	seedProbeModel(t, e, "gpt-6.1-sol", "up-sol", channelID)
 	e.api.Relay.Disguise = &relay.ProbeDisguise{}
@@ -456,7 +565,7 @@ func TestProbeQualityGPT(t *testing.T) {
 		}
 	}
 	requests := up.snapshot()
-	if len(requests) != len(run.Report.Calls) || len(requests) != 30 {
+	if len(requests) != 35 || len(run.Report.Calls) != 34 {
 		t.Fatalf("请求数 %d，报告 %d", len(requests), len(run.Report.Calls))
 	}
 	assertProbeAuth(t, requests)
@@ -466,6 +575,7 @@ func TestProbeQualityGPT(t *testing.T) {
 		}
 	}
 	up.assertFullDisguise(t, "private-codex-template")
+	assertQualityReasoningSessions(t, requests, run.Report.Calls, 10)
 	var logs int
 	e.store.Pool.QueryRow(context.Background(), `SELECT count(*) FROM request_logs`).Scan(&logs)
 	if logs != 0 {
@@ -527,6 +637,9 @@ func TestProbeQualityClaude(t *testing.T) {
 	e := newEnv(t)
 	a := e.login("admin")
 	up := newProbeUpstream(t)
+	up.mu.Lock()
+	up.retryReasoningOnce = true
+	up.mu.Unlock()
 	channelID := seedProbeChannel(t, e, "messages", "upstream-key", "", up.url(), "")
 	seedProbeModel(t, e, "claude-opus-5-5", "up-claude", channelID)
 	e.api.Relay.Disguise = &relay.ProbeDisguise{}
@@ -541,7 +654,7 @@ func TestProbeQualityClaude(t *testing.T) {
 		t.Fatalf("Claude 质量测试结果不对: %+v", run)
 	}
 	requests := up.snapshot()
-	if len(requests) != len(run.Report.Calls) || len(requests) != 27 {
+	if len(requests) != 30 || len(run.Report.Calls) != 29 {
 		t.Fatalf("Claude 请求数 = %d / %d", len(requests), len(run.Report.Calls))
 	}
 	assertProbeAuth(t, requests)
@@ -551,6 +664,7 @@ func TestProbeQualityClaude(t *testing.T) {
 		}
 	}
 	up.assertFullDisguise(t, "private-claude-template")
+	assertQualityReasoningSessions(t, requests, run.Report.Calls, 4)
 }
 
 func TestProbePartialReportOnQuotaError(t *testing.T) {

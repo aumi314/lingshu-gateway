@@ -5,20 +5,24 @@
 //	lingshu admin create -username NAME 创建管理员，密码从终端输入或标准输入读取
 //	lingshu key create -username NAME -group GROUP -name KEYNAME
 //	                                    创建 API key（前端做好之前的临时入口）
+//	lingshu probe-export-math -seed 123 -count 10 -out 题目清单.json 导出推理校准题
 package main
 
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -30,6 +34,7 @@ import (
 	"github.com/aumi314/lingshu/internal/auth"
 	"github.com/aumi314/lingshu/internal/billing"
 	"github.com/aumi314/lingshu/internal/config"
+	"github.com/aumi314/lingshu/internal/probe"
 	"github.com/aumi314/lingshu/internal/relay"
 	"github.com/aumi314/lingshu/internal/relay/usage"
 	"github.com/aumi314/lingshu/internal/store"
@@ -69,8 +74,10 @@ func run(args []string) error {
 			return errors.New("用法: lingshu key create -username NAME -group GROUP -name KEYNAME")
 		}
 		return keyCreate(args[1:])
+	case "probe-export-math":
+		return exportProbeMath(args)
 	default:
-		return fmt.Errorf("未知命令 %q，可用命令: serve、migrate、admin create、key create", cmd)
+		return fmt.Errorf("未知命令 %q，可用命令: serve、migrate、admin create、key create、probe-export-math", cmd)
 	}
 }
 
@@ -237,6 +244,69 @@ func keyCreate(args []string) error {
 		fmt.Println(key)
 		return nil
 	})
+}
+
+// exportProbeMath 用检测实际用的出题器生成校准题，逐题记录生成种子和标准答案。
+func exportProbeMath(args []string) error {
+	fs := flag.NewFlagSet("probe-export-math", flag.ContinueOnError)
+	seed := fs.Uint64("seed", 1, "出题种子")
+	count := fs.Int("count", 10, "导出题数")
+	out := fs.String("out", "", "输出 JSON 文件；留空写到标准输出")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *count <= 0 {
+		return errors.New("-count 必须大于 0")
+	}
+	kinds := []string{
+		"recurrence_hard", "subset_mod", "lattice_hard", "recurrence_hard", "subset_mod",
+		"recurrence_hard", "lattice_hard", "recurrence_hard", "subset_mod", "recurrence_hard",
+	}
+	subsets := *count / len(kinds) * 3
+	for _, kind := range kinds[:*count%len(kinds)] {
+		if kind == "subset_mod" {
+			subsets++
+		}
+	}
+	if subsets > 98 {
+		return errors.New("题数超过子集取模的 98 个不同题面")
+	}
+
+	type exportedProblem struct {
+		Index int    `json:"index"`
+		Seed  uint64 `json:"seed"`
+		probe.MathProblem
+	}
+	manifest := struct {
+		Seed     uint64            `json:"seed"`
+		Kinds    []string          `json:"kinds"`
+		Count    int               `json:"count"`
+		Problems []exportedProblem `json:"problems"`
+	}{Seed: *seed, Kinds: kinds, Count: *count}
+	seen := make(map[string]bool, *count)
+	for nextSeed := *seed; len(manifest.Problems) < *count; nextSeed++ {
+		kind := kinds[len(manifest.Problems)%len(kinds)]
+		rng := rand.New(rand.NewPCG(nextSeed, nextSeed>>1|1))
+		problem := probe.NewMathProblem(kind, rng)
+		if seen[problem.Question] {
+			continue
+		}
+		seen[problem.Question] = true
+		manifest.Problems = append(manifest.Problems, exportedProblem{Index: len(manifest.Problems), Seed: nextSeed, MathProblem: problem})
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if *out == "" {
+		_, err = os.Stdout.Write(data)
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(*out), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(*out, data, 0o644)
 }
 
 // readPassword 在终端里不回显地输入两次；非终端（管道）时读一行。

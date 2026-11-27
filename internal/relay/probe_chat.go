@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -131,6 +132,7 @@ func (h *Handler) probeChatOnce(ctx context.Context, ch *store.Channel, upstream
 	}
 
 	tracker := usage.NewTracker(usage.Chat)
+	qualityReasoning := req.Item == "reasoning" && req.DisguiseSet && req.FullDisguise
 	var text strings.Builder
 	type partial struct{ name, args strings.Builder }
 	var tools []*partial
@@ -139,7 +141,10 @@ func (h *Handler) probeChatOnce(ctx context.Context, ch *store.Channel, upstream
 			ID          string `json:"id"`
 			Model       string `json:"model"`
 			ServiceTier string `json:"service_tier"`
-			Choices     []struct {
+			Error       *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+			Choices []struct {
 				Delta        probeMessage `json:"delta"`   // 流式
 				Message      probeMessage `json:"message"` // 整段 JSON
 				FinishReason string       `json:"finish_reason"`
@@ -147,6 +152,9 @@ func (h *Handler) probeChatOnce(ctx context.Context, ch *store.Channel, upstream
 		}
 		if json.Unmarshal(data, &ev) != nil {
 			return
+		}
+		if qualityReasoning && ev.Error != nil {
+			c.Error = truncate("上游报错: "+ev.Error.Message, 300)
 		}
 		if ev.ID != "" {
 			c.ID = ev.ID
@@ -181,6 +189,9 @@ func (h *Handler) probeChatOnce(ctx context.Context, ch *store.Channel, upstream
 		for {
 			ev, err := reader.Next()
 			if err != nil {
+				if qualityReasoning && c.Error == "" && !errors.Is(err, io.EOF) {
+					c.Error = "读取流失败: " + err.Error()
+				}
 				break
 			}
 			c.Events++
@@ -191,8 +202,14 @@ func (h *Handler) probeChatOnce(ctx context.Context, ch *store.Channel, upstream
 			tracker.ObserveEvent(ev.Data)
 			parse(ev.Data)
 		}
+		if qualityReasoning && !c.Done && c.Error == "" {
+			c.Error = "流在正常结束前断开（没有 [DONE]）"
+		}
 	} else { // 要了流式却回了整段 JSON：照样解析，Done 记为 false，请求质量里会提示
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		b, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		if qualityReasoning && err != nil {
+			c.Error = "读取响应失败: " + err.Error()
+		}
 		tracker.ObserveBody(b)
 		parse(b)
 	}
@@ -208,6 +225,7 @@ func (h *Handler) probeChatOnce(ctx context.Context, ch *store.Channel, upstream
 		c.CachedTokens = u.CacheRead
 		c.OutputTokens = u.Output
 		c.ReasoningTokens = u.Reasoning
+		c.ReasoningReported = u.ReasoningReported
 	}
 	if ctx.Err() != nil && c.Error == "" && !c.Done {
 		c.Error = "超时或被取消"

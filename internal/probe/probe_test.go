@@ -36,15 +36,19 @@ func TestLoadBaselines(t *testing.T) {
 }
 
 func TestTwoButtonPlanCounts(t *testing.T) {
-	var count func(Spec) int
-	count = func(spec Spec) int {
+	count := func(spec Spec) int {
 		s, _, err := Load()
 		if err != nil {
 			t.Fatal(err)
 		}
-		p := &plan{suite: s, rng: rand.New(rand.NewPCG(17, 19)), spec: spec, protocol: IsProtocolModel(spec.Baseline)}
+		p := &plan{suite: s, rng: rand.New(rand.NewPCG(17, 19)), spec: spec, protocol: IsProtocolModel(spec.Baseline), legacy: spec.Mode == ""}
+		if p.legacy {
+			p.spec.Mode = ModeFingerprint
+		}
 		if p.protocol {
 			p.buildProtocol()
+		} else if p.legacy {
+			p.build()
 		} else if spec.mode() == ModeQuality {
 			p.buildQuality()
 		} else {
@@ -57,17 +61,30 @@ func TestTwoButtonPlanCounts(t *testing.T) {
 		}
 		return len(p.reqs)
 	}
-	if got := count(Spec{Baseline: "gpt-6.1-sol", Mode: ModeQuality}); got != 30 {
-		t.Fatalf("quality GPT requests = %d, want 30", got)
+	for _, test := range []struct {
+		name string
+		spec Spec
+		want int
+	}{
+		{"quality GPT", Spec{Baseline: "gpt-6.1-sol", Mode: ModeQuality}, 34},
+		{"quality Claude", Spec{Baseline: "claude-opus-5-5", Mode: ModeQuality}, 29},
+		{"quality GPT without token baseline", Spec{Baseline: "gpt-without-tokens", Mode: ModeQuality}, 20},
+		{"fingerprint GPT", Spec{Baseline: "gpt-6.1-sol", Mode: ModeFingerprint}, 693},
+		{"fingerprint Claude", Spec{Baseline: "claude-opus-5-5", Mode: ModeFingerprint}, 390},
+		{"legacy GPT", Spec{Baseline: "gpt-6.1-sol"}, 722},
+		{"legacy quick GPT", Spec{Baseline: "gpt-6.1-sol", Quick: true}, 251},
+		{"legacy Claude", Spec{Baseline: "claude-opus-5-5"}, 417},
+		{"legacy quick Claude", Spec{Baseline: "claude-opus-5-5", Quick: true}, 186},
+	} {
+		if got := count(test.spec); got != test.want {
+			t.Errorf("%s requests = %d, want %d", test.name, got, test.want)
+		}
 	}
-	if got := count(Spec{Baseline: "gpt-6.1-sol", Mode: ModeFingerprint}); got != 693 {
-		t.Fatalf("fingerprint GPT requests = %d, want 693", got)
-	}
-	if got := count(Spec{Baseline: "claude-opus-5-5", Mode: ModeQuality}); got != 27 {
-		t.Fatalf("quality Claude requests = %d, want 27", got)
-	}
-	if got := count(Spec{Baseline: "claude-opus-5-5", Mode: ModeFingerprint}); got != 390 {
-		t.Fatalf("fingerprint Claude requests = %d, want 390", got)
+	suite, _, _ := Load()
+	withoutTokens := &plan{suite: suite, rng: rand.New(rand.NewPCG(17, 19)), spec: Spec{Baseline: "claude-without-tokens", Mode: ModeQuality}, protocol: true}
+	withoutTokens.buildProtocol()
+	if got := len(withoutTokens.reqs); got != 15 {
+		t.Errorf("quality Claude without token baseline requests = %d, want 15", got)
 	}
 }
 

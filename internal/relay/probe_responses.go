@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -135,6 +136,7 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 	}
 
 	tracker := usage.NewTracker(usage.Responses)
+	qualityReasoning := req.Item == "reasoning" && req.DisguiseSet && req.FullDisguise
 	var out strings.Builder
 	type item struct {
 		Type      string `json:"type"`
@@ -188,6 +190,9 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 		case "response.completed", "response.incomplete":
 			c.Done = ev.Type == "response.completed"
 			c.FinishReason = ev.Response.Status
+			if qualityReasoning && !c.Done {
+				c.FinishReason = "incomplete"
+			}
 			final = ev.Response.Output
 		case "response.failed":
 			msg := "上游报告失败"
@@ -204,6 +209,9 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 		for {
 			ev, err := reader.Next()
 			if err != nil {
+				if qualityReasoning && c.Error == "" && !errors.Is(err, io.EOF) {
+					c.Error = "读取流失败: " + err.Error()
+				}
 				break
 			}
 			c.Events++
@@ -211,7 +219,10 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 			parse(ev.Data)
 		}
 	} else { // 要了流式却回了整段 JSON：按 response 对象解析，Done 记为 false，请求质量里会提示
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		b, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		if qualityReasoning && err != nil {
+			c.Error = "读取响应失败: " + err.Error()
+		}
 		tracker.ObserveBody(b)
 		var r struct {
 			ID     string `json:"id"`
@@ -246,6 +257,7 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 		c.CachedTokens = u.CacheRead
 		c.OutputTokens = u.Output
 		c.ReasoningTokens = u.Reasoning
+		c.ReasoningReported = u.ReasoningReported
 	}
 	if ctx.Err() != nil && c.Error == "" && !c.Done {
 		c.Error = "超时或被取消"

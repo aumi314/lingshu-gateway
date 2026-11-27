@@ -19,7 +19,7 @@ import (
 // Request 是一次检测请求（OpenAI Chat 格式，流式）。
 type Request struct {
 	Item           string           // 属于哪个检测项
-	Session        int              // 用第几个会话编号发（一次检测用 Sessions 个，号池按会话路由，多个会话才能抽查到不同上游）
+	Session        int              // 号池按会话路由，质量测试的推理题用独立编号
 	System         string           // 系统提示，空表示不带
 	Prompt         string           // 用户消息
 	History        []Turn           // 同一会话前面几轮的对话，按顺序放在 Prompt 前面（多轮缓存检测用）
@@ -46,33 +46,34 @@ type ToolCall struct {
 
 // Call 是一次检测请求和它的完整结果，存进检测记录供复核。
 type Call struct {
-	Item            string     `json:"item"`
-	Session         int        `json:"session"`
-	System          string     `json:"system,omitempty"`
-	Prompt          string     `json:"prompt"`
-	Effort          string     `json:"effort,omitempty"`
-	EffortSent      string     `json:"effort_sent,omitempty"` // 实际发出的推理强度（上游不支持 none 时改成 low）；空表示和 Effort 相同
-	NoneRejectedBy  string     `json:"-"`                     // none 被拒的方式：400（明确不支持）或 empty（空流）；只在检测进行中用来决定后面的请求要不要直接用 low
-	Text            string     `json:"text"`
-	ToolCalls       []ToolCall `json:"tool_calls,omitempty"`
-	HTTPStatus      int        `json:"http_status"`
-	Error           string     `json:"error,omitempty"`
-	InputTokens     int64      `json:"input_tokens"`
-	CachedTokens    int64      `json:"cached_tokens"`
-	OutputTokens    int64      `json:"output_tokens"`
-	ReasoningTokens int64      `json:"reasoning_tokens"`
-	UsageReported   bool       `json:"usage_reported"`
-	ID              string     `json:"id,omitempty"`
-	Model           string     `json:"model,omitempty"`
-	ServiceTier     string     `json:"service_tier,omitempty"`
-	FinishReason    string     `json:"finish_reason,omitempty"`
-	Done            bool       `json:"done"` // 流正常结束（chat 的 [DONE]、messages 的 message_stop）
-	Events          int        `json:"events"`
-	EventTypes      []string   `json:"event_types,omitempty"`     // messages：事件类型序列（相邻相同的合并）
-	SignedThinking  int        `json:"signed_thinking,omitempty"` // messages：带签名的 thinking 块数
-	UsageFields     []string   `json:"usage_fields,omitempty"`    // messages：message_start 里 usage 的字段名
-	FirstTokenMS    int        `json:"first_token_ms"`
-	TotalMS         int        `json:"total_ms"`
+	Item              string     `json:"item"`
+	Session           int        `json:"session"`
+	System            string     `json:"system,omitempty"`
+	Prompt            string     `json:"prompt"`
+	Effort            string     `json:"effort,omitempty"`
+	EffortSent        string     `json:"effort_sent,omitempty"` // 实际发出的推理强度（上游不支持 none 时改成 low）；空表示和 Effort 相同
+	NoneRejectedBy    string     `json:"-"`                     // none 被拒的方式：400（明确不支持）或 empty（空流）；只在检测进行中用来决定后面的请求要不要直接用 low
+	Text              string     `json:"text"`
+	ToolCalls         []ToolCall `json:"tool_calls,omitempty"`
+	HTTPStatus        int        `json:"http_status"`
+	Error             string     `json:"error,omitempty"`
+	InputTokens       int64      `json:"input_tokens"`
+	CachedTokens      int64      `json:"cached_tokens"`
+	OutputTokens      int64      `json:"output_tokens"`
+	ReasoningTokens   int64      `json:"reasoning_tokens"`
+	ReasoningReported bool       `json:"reasoning_reported"`
+	UsageReported     bool       `json:"usage_reported"`
+	ID                string     `json:"id,omitempty"`
+	Model             string     `json:"model,omitempty"`
+	ServiceTier       string     `json:"service_tier,omitempty"`
+	FinishReason      string     `json:"finish_reason,omitempty"`
+	Done              bool       `json:"done"` // 流正常结束（chat 的 [DONE]、messages 的 message_stop）
+	Events            int        `json:"events"`
+	EventTypes        []string   `json:"event_types,omitempty"`     // messages：事件类型序列（相邻相同的合并）
+	SignedThinking    int        `json:"signed_thinking,omitempty"` // messages：带签名的 thinking 块数
+	UsageFields       []string   `json:"usage_fields,omitempty"`    // messages：message_start 里 usage 的字段名
+	FirstTokenMS      int        `json:"first_token_ms"`
+	TotalMS           int        `json:"total_ms"`
 }
 
 // Caller 向被测渠道发一次请求。实现在 relay（直接打到指定渠道，不走路由、不计费、不进调用日志）。
@@ -144,8 +145,7 @@ type Report struct {
 	Calls         []Call         `json:"calls"`
 }
 
-// Sessions 是一次检测用的会话数。Codex 号池按会话路由，同一会话的请求都会打到同一个上游；
-// 分成几个会话，一次检测就能抽查几个上游，号池混用时各会话的结论会不一致。
+// Sessions 是常规会话数，质量测试的推理题从该编号起每题使用一个新会话。
 const Sessions = 4
 
 // Progress 报告进度：已完成和总请求数。
@@ -340,7 +340,7 @@ func Run(ctx context.Context, call Caller, spec Spec, progress Progress) (*Repor
 	for _, c := range calls {
 		if c.Error == "检测已取消" {
 			skipped++
-		} else if c.Error != "" {
+		} else if c.Error != "" || spec.Mode == ModeQuality && c.Item == "reasoning" && qualityReasoningFailure(c) != "" {
 			failed++
 		} else {
 			completed++
@@ -618,17 +618,7 @@ func (p *plan) buildFingerprintAnswers() {
 func (p *plan) buildQuality() {
 	s := p.suite
 	p.buildQualityTokens()
-	kinds := []string{"recurrence_hard", []string{"lattice_hard", "subset_mod", "digit_sum"}[p.rng.IntN(3)]}
-	for _, k := range kinds {
-		prob := NewMathProblem(k, p.rng)
-		for range 2 {
-			p.math = append(p.math, prob)
-			p.spread(Request{Item: "reasoning", Prompt: prob.Question, Effort: s.Math.Effort, MaxTokens: 16000})
-		}
-	}
-	p.effortProb = NewMathProblem("lattice_hard", p.rng)
-	p.spread(Request{Item: "effort", Prompt: p.effortProb.Question, Effort: "low", MaxTokens: 16000})
-	p.spread(Request{Item: "effort", Prompt: p.effortProb.Question, Effort: "high", MaxTokens: 16000})
+	p.buildQualityReasoning()
 	p.nonce = fmt.Sprintf("LS-%08x", p.rng.Uint32())
 	p.nonceValue = 10 + p.rng.IntN(90)
 	p.spread(Request{Item: "structured", MaxTokens: 256, Prompt: fmt.Sprintf("Return only the JSON object required by the provided schema.\nUse exactly {\"nonce\":%q,\"value\":%d}.", p.nonce, p.nonceValue), ResponseFormat: map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "lingshu_check", "strict": true, "schema": map[string]any{
@@ -687,7 +677,11 @@ func (p *plan) report(calls []Call) *Report {
 			r.Items = append(r.Items, p.judgePair(by["pair"]))
 		}
 	}
-	r.Items = append(r.Items, p.judgeReasoning(by["reasoning"], by["effort"], base))
+	if p.legacy {
+		r.Items = append(r.Items, p.judgeReasoning(by["reasoning"], by["effort"], base))
+	} else {
+		r.Items = append(r.Items, p.judgeQualityReasoning(by["reasoning"], base))
+	}
 	r.Items = append(r.Items, p.judgeStructured(by["structured"], by["tool"]))
 	r.Items = append(r.Items, p.judgeInstruction(by["instruction"]))
 	if len(by["needle"]) > 0 {
@@ -728,6 +722,7 @@ func (p *plan) reportFingerprint(calls []Call) *Report {
 // finalize 按各项结论算总分（通过 1、需关注 0.5、不通过 0）并写总结论；hint 非空时作为总结论。
 func finalize(r *Report, hint string) {
 	score, n, fails, warns := 0.0, 0, []string{}, 0
+	reasoningIncomplete := false
 	for _, it := range r.Items {
 		switch it.Status {
 		case Pass:
@@ -740,6 +735,8 @@ func finalize(r *Report, hint string) {
 		case Fail:
 			n++
 			fails = append(fails, it.Title)
+		case Info:
+			reasoningIncomplete = reasoningIncomplete || it.Key == "reasoning"
 		}
 	}
 	if n > 0 {
@@ -755,6 +752,9 @@ func finalize(r *Report, hint string) {
 		r.Verdict = fmt.Sprintf("基本达标，%d 项需要关注", warns)
 	default:
 		r.Verdict = "达到标准"
+	}
+	if reasoningIncomplete {
+		r.Verdict += "；推理未完成"
 	}
 }
 
