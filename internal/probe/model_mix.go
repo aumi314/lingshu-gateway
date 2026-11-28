@@ -168,8 +168,11 @@ func (p *plan) qualityModelMix(calls, anchors []Call) Item {
 		item.Summary = fmt.Sprintf("型号不符 %d 次（其中推理答对 %d、答错 %d）", len(mismatches), right, wrong)
 	case reported > 0 && p.spec.UpstreamModel != "":
 		item.Status, item.Summary = Pass, "已上报型号均与请求一致"
+	case p.spec.UpstreamModel != "" && len(sessions) > 0:
+		// 不报型号按定稿记“未上报”，不判异常，也不算没测成；其余特征照常展示
+		item.Status, item.Summary = Pass, "型号未上报，无法核对型号"
 	default:
-		item.Summary = "没测成：没有可核对的响应型号或请求型号"
+		item.Summary = "没测成：没有成功的响应可核对"
 	}
 	if features > 1 {
 		item.Summary += "；观察到多组短基准响应特征"
