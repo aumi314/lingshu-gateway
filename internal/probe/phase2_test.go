@@ -130,7 +130,7 @@ func TestQualityModelMatchAndMix(t *testing.T) {
 		t.Fatalf("unexpected Luna group: %+v", group)
 	}
 	item = p.qualityModelMix([]Call{{Item: "anchor", Done: true, Text: "1"}}, nil)
-	if item.Status != Unknown || item.Details["unreported"] != 1 {
+	if item.Status != Pass || !strings.Contains(item.Summary, "型号未上报") || item.Details["unreported"] != 1 {
 		t.Fatalf("unreported model: %+v", item)
 	}
 }
