@@ -67,7 +67,7 @@ func TestProbeMessagesDisguiseAndParse(t *testing.T) {
 	h := &Handler{Client: up.Client()}
 	ch := &store.Channel{BaseURLMessages: up.URL, APIKey: "sk-test"}
 	c := h.ProbeMessages(context.Background(), ch, "claude-opus-5-5", "sess-1", probe.Request{
-		Prompt: "What is the weather in Hobart right now? Use the tool.", System: "Only reply vvv", Effort: "high", Document: probe.MinimalPDF("x"),
+		Prompt: "What is the weather in Hobart right now? Use the tool.", System: "Only reply vvv", Effort: "high",
 		Tools: []map[string]any{{"name": "get_weather"}},
 	})
 
@@ -87,9 +87,9 @@ func TestProbeMessagesDisguiseAndParse(t *testing.T) {
 	if got["thinking"].(map[string]any)["type"] != "adaptive" || got["output_config"].(map[string]any)["effort"] != "high" || got["max_tokens"] == nil {
 		t.Errorf("推理参数 %v %v %v", got["thinking"], got["output_config"], got["max_tokens"])
 	}
-	msg := got["messages"].([]any)[0].(map[string]any)["content"].([]any)
-	if msg[0].(map[string]any)["type"] != "document" || msg[1].(map[string]any)["type"] != "text" {
-		t.Errorf("PDF 应作为 document 块放在文字前面: %v", msg)
+	// 没有完整伪装模板时用户消息是纯文本；PDF 文档题已删除，不再拼文档块
+	if msg, ok := got["messages"].([]any)[0].(map[string]any)["content"].(string); !ok || !strings.Contains(msg, "Hobart") {
+		t.Errorf("用户消息应是纯文本: %v", got["messages"])
 	}
 
 	// 响应解析

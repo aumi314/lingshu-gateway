@@ -53,8 +53,8 @@ func TestQualityNeedleEvidence(t *testing.T) {
 	}
 }
 
-func TestQualityStructuredAndToolSeparately(t *testing.T) {
-	p := &plan{city: "Reykjavik", toolName: "get_weather_12ab", nonce: "LS-example", nonceValue: 21}
+func TestQualityTool(t *testing.T) {
+	p := &plan{city: "Reykjavik", toolName: "get_weather_12ab"}
 	for _, test := range []struct {
 		name, arguments string
 		want            Status
@@ -73,11 +73,6 @@ func TestQualityStructuredAndToolSeparately(t *testing.T) {
 		if tool.Status != test.want {
 			t.Errorf("%s %s: tool=%+v, want %s", test.name, test.arguments, tool, test.want)
 		}
-	}
-	good := p.qualityStructured([]Call{{Text: `{"value":21,"nonce":"LS-example"}`}})
-	bad := p.qualityStructured([]Call{{Text: `{"value":"21","nonce":"LS-example"}`}})
-	if good.Status != Pass || bad.Status != Fail {
-		t.Errorf("structured: good=%+v bad=%+v", good, bad)
 	}
 }
 
@@ -114,7 +109,7 @@ func TestQualityReportTimeoutAndRuleSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	if report.StopReason != "timeout" || report.StopMessage == "" || report.Verdict != "无法判定" || report.Score != nil ||
-		report.FormatVersion != 3 || report.RuleVersion == "" || report.BaselineID == "" || report.Counts != (RunCounts{Planned: 34, Skipped: 34}) {
+		report.FormatVersion != 3 || report.RuleVersion != "quality-v3.2" || report.BaselineID == "" || report.Counts != (RunCounts{Planned: 38, Skipped: 38}) {
 		t.Fatalf("timeout report: stop=%s verdict=%s counts=%+v", report.StopReason, report.Verdict, report.Counts)
 	}
 	rules := map[string]ReportRule{}
@@ -144,7 +139,7 @@ func TestQualityQuotaKeepsCompletedEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	if report.StopReason != "quota" || report.Verdict != "不通过" || report.Score != nil ||
-		report.Counts != (RunCounts{Planned: 34, Sent: 33, Completed: 30, Failed: 3, Skipped: 1}) {
+		report.Counts != (RunCounts{Planned: 38, Sent: 37, Completed: 34, Failed: 3, Skipped: 1}) {
 		t.Fatalf("quota report: stop=%s verdict=%s counts=%+v", report.StopReason, report.Verdict, report.Counts)
 	}
 	if item := findQualityItem(report.Blocks[0].Items, "reasoning_usage"); item.Status != Fail {

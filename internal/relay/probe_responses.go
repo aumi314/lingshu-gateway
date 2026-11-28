@@ -19,7 +19,7 @@ import (
 // ProbeResponses 向渠道发一次 GPT 检测请求，走 Responses 协议（真实 Codex 只走这个接口；走 Chat 再挂 Codex 的 UA 一眼就能认出是检测）。
 // 和 ProbeChat 一样直接用渠道自己的地址、key 和代理：不走路由、不计费、不写调用日志、不影响渠道健康状态。
 // 有伪装配置时请求和真实 Codex 0.160 同形：input 前缀是工具、开发者说明和环境，会话元数据进请求头和 client_metadata，
-// 不传 temperature、max_output_tokens。
+// 完整伪装通常不传 temperature、max_output_tokens；指令题单独设置输出上限。
 func (h *Handler) ProbeResponses(ctx context.Context, ch *store.Channel, upstreamModel, session string, req probe.Request) probe.Call {
 	return effortFallback(ctx, req, func(r probe.Request) probe.Call { return h.probeResponsesOnce(ctx, ch, upstreamModel, session, r) })
 }
@@ -72,14 +72,11 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 			body["max_output_tokens"] = max(req.MaxTokens, 16) // Responses 协议下限 16
 		}
 	}
+	if req.Item == "instruction" && req.MaxTokens > 0 {
+		body["max_output_tokens"] = req.MaxTokens
+	}
 	if len(reasoning) > 0 {
 		body["reasoning"] = reasoning
-	}
-	// 检测题的结构化输出（Chat 的 response_format）换成 Responses 的 text.format
-	if rf := req.ResponseFormat; rf != nil {
-		if js, ok := rf["json_schema"].(map[string]any); ok {
-			text["format"] = map[string]any{"type": "json_schema", "name": js["name"], "strict": js["strict"], "schema": js["schema"]}
-		}
 	}
 	if len(text) > 0 {
 		body["text"] = text
@@ -141,6 +138,7 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 	}
 	defer resp.Body.Close()
 	c.HTTPStatus = resp.StatusCode
+	c.RetryAfter = probeRetryAfter(resp.Header)
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		captureProbeError(resp, b, tracker)
@@ -264,6 +262,12 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 		case "custom_tool_call":
 			c.ToolCalls = append(c.ToolCalls, probe.ToolCall{Name: it.Name, Arguments: it.Input})
 		case "message":
+			for _, part := range it.Content {
+				if part.Type == "refusal" {
+					c.AttemptError = "refused"
+					c.Error = "上游拒绝作答"
+				}
+			}
 			if c.Text == "" {
 				for _, part := range it.Content {
 					c.Text += part.Text

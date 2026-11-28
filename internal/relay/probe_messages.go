@@ -60,12 +60,6 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 		}
 	}
 	var content any = d.directPrompt(req.Prompt, len(req.Tools) > 0, d.hasClaude() && len(d.Claude.Tools) > 0)
-	if req.Document != "" {
-		content = []map[string]any{
-			{"type": "document", "source": map[string]any{"type": "base64", "media_type": "application/pdf", "data": req.Document}},
-			{"type": "text", "text": content},
-		}
-	}
 	device := make([]byte, 32)
 	rand.Read(device)
 	userID, _ := json.Marshal(map[string]string{"device_id": hex.EncodeToString(device), "account_uuid": NewProbeSession(), "session_id": session})
@@ -84,12 +78,7 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 			map[string]any{"role": "assistant", "content": []map[string]any{{"type": "text", "text": t.Assistant}}})
 	}
 	if d.hasClaude() {
-		blocks, ok := content.([]map[string]any)
-		if !ok {
-			blocks = []map[string]any{{"type": "text", "text": content}}
-		}
-		blocks[len(blocks)-1]["cache_control"] = map[string]any{"type": "ephemeral"}
-		content = blocks
+		content = []map[string]any{{"type": "text", "text": content, "cache_control": map[string]any{"type": "ephemeral"}}}
 	}
 	messages = append(messages, map[string]any{"role": "user", "content": content})
 	body := map[string]any{"model": upstreamModel, "max_tokens": maxTokens, "stream": true, "system": system,
@@ -150,6 +139,7 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 	}
 	defer resp.Body.Close()
 	c.HTTPStatus = resp.StatusCode
+	c.RetryAfter = probeRetryAfter(resp.Header)
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		captureProbeError(resp, b, tracker)

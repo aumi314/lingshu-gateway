@@ -264,9 +264,11 @@ function isLegacyReport(run: Run): boolean {
   return run.preset === 'quality' && !isV3(run.report)
 }
 
-function metricText(value: number | undefined, samples: number | undefined, missingReason: string | undefined, format: (n: number) => string, t: (zh: string, en: string) => string): string {
-  if (value !== undefined) return `${format(value)}（${t('样本', 'samples')} ${samples ?? '—'}）`
-  return `${missingReason || t('无样本', 'No samples')}（${t('样本', 'samples')} ${samples ?? 0}）`
+// 指标卡片只放短值；测不到时显示“未测到”，原因放进悬停提示，不把长句塞进卡片
+type MetricCell = { value: string; hint?: string }
+function metricText(value: number | undefined, samples: number | undefined, missingReason: string | undefined, format: (n: number) => string, t: (zh: string, en: string) => string): MetricCell {
+  if (value !== undefined) return { value: format(value), hint: `${t('样本', 'Samples')} ${samples ?? '—'}` }
+  return { value: t('未测到', 'Not measured'), hint: missingReason || t('无样本', 'No samples') }
 }
 
 function usableFraction(usable: number, sent: number, t: (zh: string, en: string) => string): string {
@@ -444,15 +446,20 @@ function Result({ run, protocol, statusIcon, statusText }: { run: Run; protocol:
       </Row>
       <Row gutter={[12, 12]} style={{ marginTop: 16 }}>
         {[
-          [t('首字延迟', 'First token'), v3 ? metricText(m.first_token_ms, m.ttft_samples, m.ttft_missing_reason, (n) => `${(n / 1000).toFixed(1)}s`, t) : m.first_token_ms !== undefined ? `${(m.first_token_ms / 1000).toFixed(1)}s` : '—'],
-          [t('输出速度', 'Speed'), v3 ? metricText(m.tokens_per_sec, m.output_tps_samples, m.output_tps_missing_reason, (n) => `${n} tok/s`, t) : m.tokens_per_sec !== undefined ? `${m.tokens_per_sec} tok/s` : '—'],
-          [t('请求 / 失败', 'Requests / failed'), `${m.requests} / ${m.errors}`],
-          [t('输入 tokens', 'Input tokens'), tokens(m.input_tokens ?? 0)],
-          [t('输出 tokens', 'Output tokens'), tokens(m.output_tokens ?? 0)],
-          [t('缓存读取', 'Cache read'), tokens(m.cached_tokens ?? 0)],
-        ].map(([title, value]) => (
-          <Col xs={12} md={4} key={title}><Card size="small"><Statistic title={title} value={value} /></Card></Col>
-        ))}
+          [t('首字延迟', 'First token'), v3 ? metricText(m.first_token_ms, m.ttft_samples, m.ttft_missing_reason, (n) => `${(n / 1000).toFixed(1)}s`, t) : { value: m.first_token_ms !== undefined ? `${(m.first_token_ms / 1000).toFixed(1)}s` : '—' }],
+          [t('输出速度', 'Speed'), v3 ? metricText(m.tokens_per_sec, m.output_tps_samples, m.output_tps_missing_reason, (n) => `${n} tok/s`, t) : { value: m.tokens_per_sec !== undefined ? `${m.tokens_per_sec} tok/s` : '—' }],
+          [t('请求 / 失败', 'Requests / failed'), { value: `${m.requests} / ${m.errors}` }],
+          [t('输入 tokens', 'Input tokens'), { value: tokens(m.input_tokens ?? 0) }],
+          [t('输出 tokens', 'Output tokens'), { value: tokens(m.output_tokens ?? 0) }],
+          [t('缓存读取', 'Cache read'), { value: tokens(m.cached_tokens ?? 0) }],
+        ].map(([title, cell]) => {
+          const { value, hint } = cell as MetricCell
+          return (
+            <Col xs={12} md={4} key={title as string}>
+              <Tooltip title={hint}><Card size="small"><Statistic title={title as string} value={value} /></Card></Tooltip>
+            </Col>
+          )
+        })}
       </Row>
       <Collapse
         style={{ marginTop: 16 }}

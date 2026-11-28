@@ -44,6 +44,9 @@ func effortFallback(ctx context.Context, req probe.Request, once func(probe.Requ
 		return c
 	}
 	if by := noneRejected(c); req.Effort == "none" && by != "" {
+		if req.BeforeRetry != nil && !req.BeforeRetry() {
+			return probe.Call{NotSent: true, Error: "检测已取消"}
+		}
 		req.Effort = "low"
 		req.RetryReason = "effort_none_rejected_" + by
 		c = once(req)
@@ -53,6 +56,9 @@ func effortFallback(ctx context.Context, req probe.Request, once func(probe.Requ
 		}
 	}
 	if msg := strings.ToLower(c.Error); ctx.Err() == nil && c.HTTPStatus == http.StatusBadRequest && (strings.Contains(msg, "reasoning") || strings.Contains(msg, "'"+req.Effort+"'")) {
+		if req.BeforeRetry != nil && !req.BeforeRetry() {
+			return probe.Call{NotSent: true, Error: "检测已取消"}
+		}
 		req.Effort = ""
 		req.RetryReason = "effort_rejected"
 		c = once(req)
@@ -93,9 +99,6 @@ func (h *Handler) probeChatOnce(ctx context.Context, ch *store.Channel, upstream
 	}
 	if req.MaxTokens > 0 {
 		body["max_completion_tokens"] = req.MaxTokens
-	}
-	if req.ResponseFormat != nil {
-		body["response_format"] = req.ResponseFormat
 	}
 	if len(req.Tools) > 0 {
 		body["tools"] = req.Tools

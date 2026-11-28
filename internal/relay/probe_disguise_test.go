@@ -112,8 +112,7 @@ func TestProbeResponsesShapeAndParse(t *testing.T) {
 	d, _ := LoadProbeDisguise(writeDisguise(t, testDisguise))
 	h := &Handler{Client: up.Client(), Disguise: d}
 	req := probe.Request{Prompt: "weather?", System: "Only reply kiwi", Effort: "high", MaxTokens: 64,
-		Tools:          []map[string]any{{"type": "function", "function": map[string]any{"name": "get_weather_ab12", "description": "d", "parameters": map[string]any{"type": "object"}}}},
-		ResponseFormat: map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "x", "strict": true, "schema": map[string]any{"type": "object"}}}}
+		Tools: []map[string]any{{"type": "function", "function": map[string]any{"name": "get_weather_ab12", "description": "d", "parameters": map[string]any{"type": "object"}}}}}
 	c := h.ProbeResponses(context.Background(), &store.Channel{BaseURLResponses: up.URL + "/v1", APIKey: "k"}, "gpt-6.1-sol", "sess-9", req)
 
 	// 请求形态和真实 Codex 一致
@@ -136,7 +135,7 @@ func TestProbeResponsesShapeAndParse(t *testing.T) {
 	if r["effort"] != "high" || r["context"] != "all_turns" || got["prompt_cache_key"] != "sess-9" || got["tool_choice"] != "auto" {
 		t.Errorf("请求体 %v", got)
 	}
-	if tf := got["text"].(map[string]any); tf["verbosity"] != "low" || tf["format"].(map[string]any)["type"] != "json_schema" {
+	if tf := got["text"].(map[string]any); tf["verbosity"] != "low" || tf["format"] != nil {
 		t.Errorf("text %v", tf)
 	}
 	if tl := got["tools"].([]any); tl[0].(map[string]any)["name"] != "get_weather_ab12" || tl[0].(map[string]any)["type"] != "function" {
