@@ -30,6 +30,9 @@ type Request struct {
 	Document       string           // 附带的 PDF（base64），只用于 Claude
 	FullDisguise   bool             // true 时使用服务器的真实客户端模板
 	DisguiseSet    bool             `json:"-"` // false keeps legacy relay behavior for direct callers
+
+	RetryReason string             `json:"-"`
+	OnAttempt   func(Call, string) `json:"-"`
 }
 
 // Turn 是一轮已经发生的对话：用户说的和模型回的。
@@ -79,6 +82,11 @@ type Call struct {
 	VisibleFirstMS    int        `json:"visible_first_ms,omitempty"`
 	VisibleLastMS     int        `json:"visible_last_ms,omitempty"`
 	VisibleEvents     int        `json:"visible_events,omitempty"`
+
+	NotSent      bool         `json:"-"`
+	BodyComplete bool         `json:"-"`
+	AttemptError string       `json:"-"`
+	WireUsage    AttemptUsage `json:"-"`
 }
 
 // RecordVisible 记录一个真正有可见正文的事件；空白和不可见内容不计入。
@@ -171,6 +179,8 @@ type Report struct {
 	Observations  []Item         `json:"observations"` // 请求质量：注入、水印、上游混用、流式、协议；不计分
 	Metrics       map[string]any `json:"metrics"`
 	Calls         []Call         `json:"calls"`
+	Attempts      []Attempt      `json:"attempts,omitempty"`
+	Availability  *Availability  `json:"availability,omitempty"`
 }
 
 // Sessions 是常规会话数，质量测试的推理题从该编号起每题使用一个新会话。
@@ -225,8 +235,10 @@ func Run(ctx context.Context, call Caller, spec Spec, progress Progress) (*Repor
 	}
 
 	calls := make([]Call, len(plan.reqs))
+	attempts := make([][]Attempt, len(plan.reqs))
+	scheduled := make([]bool, len(plan.reqs))
+	cancelled := make([]bool, len(plan.reqs))
 	var done atomic.Int32
-	var sent atomic.Int32
 	stopReason, stopVerdict := "", ""
 	stopIndex := -1
 	quotaStreak := 0
@@ -248,40 +260,46 @@ func Run(ctx context.Context, call Caller, spec Spec, progress Progress) (*Repor
 	execute := func(indices []int, limit int, preflight bool) {
 		sem := make(chan struct{}, limit)
 		var wg sync.WaitGroup
+	schedule:
 		for _, i := range indices {
+			select {
+			case <-child.Done():
+				break schedule
+			case sem <- struct{}{}:
+			}
 			if child.Err() != nil {
+				<-sem
 				break
 			}
+			scheduled[i] = true
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				sem <- struct{}{}
 				defer func() { <-sem }()
 				req := plan.reqs[i]
-				if child.Err() != nil {
-					calls[i] = Call{Item: req.Item, Session: req.Session, Prompt: storedPrompt(req.Prompt), Error: "检测已取消"}
-					return
-				}
-				sent.Add(1)
-				c := callWithRetry(child, call, req)
-				c.Item, c.Session, c.System, c.Prompt, c.Effort = req.Item, req.Session, req.System, storedPrompt(req.Prompt), req.Effort
-				if len(req.Tools) == 0 && c.Error == "" && strings.TrimSpace(c.Text) == "" && len(c.ToolCalls) > 0 {
-					c.Error = "模型调用了工具 " + c.ToolCalls[0].Name + "，没有直接回答"
-				}
-				calls[i] = c
 				runes := utf8.RuneCountInString(req.System) + utf8.RuneCountInString(req.Prompt)
 				for _, h := range req.History {
 					runes += utf8.RuneCountInString(h.User) + utf8.RuneCountInString(h.Assistant)
 				}
 				expected := baseTokens + int64(runes/3)
-				msg := strings.ToLower(c.Error)
-				stopMu.Lock()
-				if stopReason == "" {
+				stoppedHere := false
+				observe := func(c Call, reason string) {
+					attempts[i] = append(attempts[i], newAttempt(req, i+1, len(attempts[i])+1, reason, c))
+					stopMu.Lock()
+					defer stopMu.Unlock()
+					if stopReason != "" || child.Err() != nil {
+						return
+					}
+					msg := strings.ToLower(c.Error)
+					input := c.InputTokens
+					if c.WireUsage.Fields != nil {
+						input = c.WireUsage.Input + c.WireUsage.CacheRead + c.WireUsage.CacheWrite
+					}
 					switch {
-					case c.UsageReported && c.InputTokens > 3*expected && c.InputTokens > expected+10000:
+					case (c.UsageReported || c.WireUsage.Fields != nil) && input > 3*expected && input > expected+10000:
 						stopReason = "billing_anomaly"
 						stopIndex = i
-						stopVerdict = fmt.Sprintf("上游计费的输入 token 约是实际发送的 %.1f 倍（实际约 %d，上游报 %d），已中止检测避免继续扣费。", float64(c.InputTokens)/float64(expected), expected, c.InputTokens)
+						stopVerdict = fmt.Sprintf("上游计费的输入 token 约是实际发送的 %.1f 倍（实际约 %d，上游报 %d），已中止检测避免继续扣费。", float64(input)/float64(expected), expected, input)
 					case quotaError(c, msg):
 						quotaStreak++
 						if preflight || quotaStreak >= 3 {
@@ -293,10 +311,17 @@ func Run(ctx context.Context, call Caller, spec Spec, progress Progress) (*Repor
 						quotaStreak = 0
 					}
 					if stopReason != "" {
+						stoppedHere = true
 						cancel()
 					}
 				}
-				stopMu.Unlock()
+				c, interrupted := callWithRetry(child, call, req, observe)
+				cancelled[i] = interrupted && !stoppedHere
+				c.Item, c.Session, c.System, c.Prompt, c.Effort = req.Item, req.Session, req.System, storedPrompt(req.Prompt), req.Effort
+				if len(req.Tools) == 0 && c.Error == "" && strings.TrimSpace(c.Text) == "" && len(c.ToolCalls) > 0 {
+					c.Error = "模型调用了工具 " + c.ToolCalls[0].Name + "，没有直接回答"
+				}
+				calls[i] = c
 				if progress != nil {
 					progress(int(done.Add(1)), len(plan.reqs))
 				}
@@ -388,7 +413,8 @@ func Run(ctx context.Context, call Caller, spec Spec, progress Progress) (*Repor
 			report.Disguise, report.Template, report.TemplateHash = true, spec.Template, spec.TemplateHash
 		}
 	}
-	report.Counts = RunCounts{Planned: len(plan.reqs), Sent: int(sent.Load()), Completed: completed, Failed: failed, Skipped: skipped}
+	report.Attempts, report.Availability = summarizeAttempts(attempts, scheduled, cancelled)
+	report.Counts = RunCounts{Planned: len(plan.reqs), Sent: report.Availability.SentQuestions, Completed: completed, Failed: failed, Skipped: skipped}
 	stopMu.Lock()
 	report.StopReason = stopReason
 	if stopVerdict != "" {
@@ -418,22 +444,40 @@ func Run(ctx context.Context, call Caller, spec Spec, progress Progress) (*Repor
 	return report, nil
 }
 
-func callWithRetry(ctx context.Context, call Caller, req Request) Call {
+func callWithRetry(ctx context.Context, call Caller, req Request, observe func(Call, string)) (Call, bool) {
 	var c Call
 	for attempt := 0; attempt < 4; attempt++ {
+		if ctx.Err() != nil {
+			if attempt == 0 {
+				c.Error = "检测已取消"
+			}
+			return c, true
+		}
+		observed := false
+		req.OnAttempt = func(result Call, reason string) {
+			observed = true
+			observe(result, reason)
+		}
 		c = call(ctx, req)
+		if !observed && !c.NotSent {
+			if c.EffortSent == "" {
+				c.EffortSent = req.Effort
+			}
+			observe(c, req.RetryReason)
+		}
 		msg := strings.ToLower(c.Error)
 		retry := c.HTTPStatus == http.StatusTooManyRequests || c.HTTPStatus == http.StatusServiceUnavailable || c.HTTPStatus == 529 || gatewayError(c) || strings.Contains(msg, "overloaded") || strings.Contains(msg, "rate_limit") || strings.Contains(msg, "too many requests")
-		if !retry || attempt == 3 || ctx.Err() != nil {
-			return c
+		if !retry || attempt == 3 {
+			return c, ctx.Err() != nil && (c.AttemptError == "cancelled" || c.AttemptError == "timeout" || c.NotSent)
 		}
+		req.RetryReason = attemptError(c, false)
 		select {
 		case <-time.After(time.Duration(5*(1<<attempt)) * time.Second):
 		case <-ctx.Done():
-			return c
+			return c, true
 		}
 	}
-	return c
+	return c, false
 }
 
 // gatewayError：网关没等到上游（502 / 504，Cloudflare 的 524 是 100 秒没有首字节）。和渠道质量无关，重试；重试后仍失败也不当成模型的问题。

@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	"github.com/aumi314/lingshu/internal/probe"
 	"github.com/aumi314/lingshu/internal/relay"
 )
@@ -479,9 +481,11 @@ type probeRunView struct {
 			Thresholds map[string]any `json:"thresholds"`
 			Evidence   string         `json:"evidence"`
 		} `json:"rules"`
-		Counts probe.RunCounts   `json:"counts"`
-		Items  []json.RawMessage `json:"items"`
-		Calls  []json.RawMessage `json:"calls"`
+		Counts       probe.RunCounts     `json:"counts"`
+		Items        []json.RawMessage   `json:"items"`
+		Calls        []json.RawMessage   `json:"calls"`
+		Attempts     []probe.Attempt     `json:"attempts"`
+		Availability *probe.Availability `json:"availability"`
 	} `json:"report"`
 }
 
@@ -777,6 +781,52 @@ func TestProbePartialReportOnQuotaError(t *testing.T) {
 	}
 	if len(run.Report.Calls) != run.Report.Counts.Planned {
 		t.Fatalf("部分报告调用数 = %d, planned = %d", len(run.Report.Calls), run.Report.Counts.Planned)
+	}
+}
+
+func TestProbeFailedAttemptCostWithCacheWrite(t *testing.T) {
+	e := newEnv(t)
+	a := e.login("admin")
+	up := newProbeUpstream(t)
+	up.mu.Lock()
+	up.script = func(w http.ResponseWriter, request probeUpstreamRequest) bool {
+		if !strings.Contains(outboundPrompt(request), "The text above contains three secret codes") {
+			return false
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(529)
+		fmt.Fprint(w, `{"error":{"message":"overloaded"},"usage":{"input_tokens":5,"cache_read_input_tokens":10000,"cache_creation_input_tokens":1000000,"output_tokens":2}}`)
+		return true
+	}
+	up.mu.Unlock()
+	channelID := seedProbeChannel(t, e, "attempt-cost", "upstream-key", "", up.url(), "")
+	seedProbeModel(t, e, "claude-opus-5-5", "up-claude", channelID)
+	if _, err := e.store.Pool.Exec(t.Context(), `UPDATE models SET cache_write_price = 3 WHERE id = (SELECT model_id FROM channel_models WHERE channel_id = $1)`, channelID); err != nil {
+		t.Fatal(err)
+	}
+	e.api.Relay.Disguise = &relay.ProbeDisguise{}
+	e.api.Relay.Disguise.Claude.System = []map[string]any{{"type": "text", "text": "private Claude Code system prompt"}}
+	code, body, id := startProbe(t, a, map[string]any{"channel_id": channelID, "model": "claude-opus-5-5", "preset": probe.ModeQuality})
+	if code != http.StatusOK {
+		t.Fatalf("发起检测: %d %s", code, body)
+	}
+	run := waitProbeRun(t, a, id)
+	attempts, stats := run.Report.Attempts, run.Report.Availability
+	if run.Status != "failed" || run.Report.StopReason != "billing_anomaly" || stats == nil || len(attempts) < 2 || len(attempts) != len(up.snapshot()) || stats.Sends != len(attempts) || stats.Unscheduled == 0 {
+		t.Fatalf("应在第一轮失败用量触发时停机并保存发送记录: status=%s reason=%s attempts=%+v stats=%+v", run.Status, run.Report.StopReason, attempts, stats)
+	}
+	for _, attempt := range attempts {
+		if attempt.Number != 1 {
+			t.Fatalf("不应重试: %+v", attempt)
+		}
+	}
+	failed := attempts[len(attempts)-1]
+	if failed.Item != "needle" || failed.HTTPStatus != 529 || failed.Usage.Input != 5 || failed.Usage.CacheRead != 10000 || failed.Usage.CacheWrite != 1000000 || failed.Usage.Output != 2 {
+		t.Fatalf("失败尝试应独立保存各类用量: %+v", failed)
+	}
+	want := decimal.RequireFromString("3.00103").Add(decimal.RequireFromString("0.008766").Mul(decimal.NewFromInt(int64(len(attempts) - 1))))
+	if got, err := decimal.NewFromString(run.Cost); err != nil || !got.Equal(want) {
+		t.Fatalf("费用 = %q，期望 %s", run.Cost, want)
 	}
 }
 
