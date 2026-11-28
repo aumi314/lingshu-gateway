@@ -32,6 +32,12 @@ func TestQualityReasoningPlan(t *testing.T) {
 				seen := map[string]bool{}
 				counts := map[string]int{}
 				for _, req := range p.reqs {
+					if req.Item == "mix_anchor" {
+						if req.Session < Sessions || req.Session >= Sessions+test.counts["recurrence_hard"] || req.Effort != "" {
+							t.Fatalf("seed %d: invalid mix anchor: %+v", seed, req)
+						}
+						continue
+					}
 					if req.Item != "reasoning" {
 						if req.Session >= Sessions || req.Item == "effort" {
 							t.Fatalf("seed %d: unexpected %s request in session %d", seed, req.Item, req.Session)
@@ -113,13 +119,13 @@ func TestQualityReasoningTruncationCountsAsFailed(t *testing.T) {
 		if request.Item == "reasoning" {
 			return Call{Text: "partial 123", FinishReason: "incomplete", ReasoningReported: true}
 		}
-		return Call{Text: "ok"}
+		return Call{Text: "ok", Done: true}
 	}, Spec{Baseline: "gpt-6.1-sol", Mode: ModeQuality, Seed: 1}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (RunCounts{Planned: 34, Sent: 34, Completed: 24, Failed: 10}); report.Counts != want {
-		t.Errorf("counts = %+v, want %+v", report.Counts, want)
+	if report.StopReason != "low_availability" || report.Counts.Planned != 38 || report.Counts.Skipped == 0 || report.Counts.Failed == 0 {
+		t.Errorf("counts = %+v, stop = %q", report.Counts, report.StopReason)
 	}
 	if item := findQualityItem(report.Blocks[0].Items, "reasoning_coverage"); item.Status != Unknown {
 		t.Errorf("reasoning item = %+v, verdict = %q", item, report.Verdict)

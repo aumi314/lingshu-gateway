@@ -6,12 +6,26 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/aumi314/lingshu/internal/probe"
 	"github.com/aumi314/lingshu/internal/relay/usage"
 )
+
+func probeRetryAfter(header http.Header) *time.Duration {
+	value := strings.TrimSpace(header.Get("Retry-After"))
+	if seconds, err := strconv.ParseUint(value, 10, 64); err == nil && seconds <= uint64((1<<63-1)/time.Second) {
+		delay := time.Duration(seconds) * time.Second
+		return &delay
+	}
+	if date, err := http.ParseTime(value); err == nil {
+		delay := max(0, time.Until(date))
+		return &delay
+	}
+	return nil
+}
 
 type probeUsage struct {
 	*usage.Tracker

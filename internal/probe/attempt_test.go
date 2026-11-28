@@ -119,3 +119,19 @@ func TestLegacyReportWithoutAttempts(t *testing.T) {
 		t.Fatalf("旧报告应保留原答卷和结论: %s (%v)", raw, err)
 	}
 }
+
+func TestLegacyQualityRuleSnapshotSurvives(t *testing.T) {
+	var report Report
+	old := `{"format_version":3,"rule_version":"quality-v3.1","blocks":[{"key":"experience","items":[{"key":"structured","rule_id":"structured","status":"pass"},{"key":"document","rule_id":"document","status":"pass"},{"key":"echo","rule_id":"echo","status":"fail"}]}],"rules":[{"id":"structured","version":"quality-v3.1"},{"id":"document","version":"quality-v3.1"},{"id":"echo","version":"quality-v3.1"}]}`
+	if err := json.Unmarshal([]byte(old), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.RuleVersion != "quality-v3.1" || len(report.Blocks) != 1 || len(report.Blocks[0].Items) != 3 || len(report.Rules) != 3 {
+		t.Fatalf("旧报告未保留规则快照: %+v", report)
+	}
+	for _, rule := range report.Rules {
+		if item := findQualityItem(report.Blocks[0].Items, rule.ID); item.RuleID != rule.ID {
+			t.Errorf("旧规则 %q 找不到对应结果", rule.ID)
+		}
+	}
+}

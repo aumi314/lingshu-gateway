@@ -256,6 +256,9 @@ func (s *Server) runProbe(run store.ProbeRun, ch *store.Channel) {
 	}
 	spec := probe.Spec{Baseline: run.Baseline, UpstreamModel: run.UpstreamModel, Mode: probe.NormalizeMode(run.Preset)}
 	if spec.Mode == probe.ModeQuality {
+		if run.Model != run.UpstreamModel {
+			spec.ModelAliases = []string{run.Model}
+		}
 		if tp, ok := s.Relay.Disguise.Template(probe.Family(run.Baseline)); ok {
 			spec.Disguise, spec.Template, spec.TemplateHash, spec.TemplateTokens = true, tp.Name, tp.Hash, tp.Tokens
 		}

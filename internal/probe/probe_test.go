@@ -2,7 +2,6 @@ package probe
 
 import (
 	"context"
-	"encoding/base64"
 	"math/rand/v2"
 	"regexp"
 	"sort"
@@ -66,15 +65,15 @@ func TestTwoButtonPlanCounts(t *testing.T) {
 		spec Spec
 		want int
 	}{
-		{"quality GPT", Spec{Baseline: "gpt-6.1-sol", Mode: ModeQuality}, 34},
+		{"quality GPT", Spec{Baseline: "gpt-6.1-sol", Mode: ModeQuality}, 38},
 		{"quality Claude", Spec{Baseline: "claude-opus-5-5", Mode: ModeQuality}, 29},
-		{"quality GPT without token baseline", Spec{Baseline: "gpt-without-tokens", Mode: ModeQuality}, 20},
+		{"quality GPT without token baseline", Spec{Baseline: "gpt-without-tokens", Mode: ModeQuality}, 24},
 		{"fingerprint GPT", Spec{Baseline: "gpt-6.1-sol", Mode: ModeFingerprint}, 693},
 		{"fingerprint Claude", Spec{Baseline: "claude-opus-5-5", Mode: ModeFingerprint}, 390},
-		{"legacy GPT", Spec{Baseline: "gpt-6.1-sol"}, 722},
-		{"legacy quick GPT", Spec{Baseline: "gpt-6.1-sol", Quick: true}, 251},
-		{"legacy Claude", Spec{Baseline: "claude-opus-5-5"}, 417},
-		{"legacy quick Claude", Spec{Baseline: "claude-opus-5-5", Quick: true}, 186},
+		{"legacy GPT", Spec{Baseline: "gpt-6.1-sol"}, 721},
+		{"legacy quick GPT", Spec{Baseline: "gpt-6.1-sol", Quick: true}, 250},
+		{"legacy Claude", Spec{Baseline: "claude-opus-5-5"}, 415},
+		{"legacy quick Claude", Spec{Baseline: "claude-opus-5-5", Quick: true}, 184},
 	} {
 		if got := count(test.spec); got != test.want {
 			t.Errorf("%s requests = %d, want %d", test.name, got, test.want)
@@ -146,7 +145,6 @@ func fakeUpstream(t *testing.T, model string, seed uint64) Caller {
 	b := bs[model]
 	rng := rand.New(rand.NewPCG(seed, 9))
 	var mu sync.Mutex
-	nonce := regexp.MustCompile(`Use exactly (\{.*\})`)
 	return func(_ context.Context, req Request) Call {
 		mu.Lock()
 		defer mu.Unlock()
@@ -167,8 +165,6 @@ func fakeUpstream(t *testing.T, model string, seed uint64) Caller {
 			if ans := b.Answers[q]; len(ans) > 0 {
 				c.Text = ans[rng.IntN(len(ans))]
 			}
-		case "structured":
-			c.Text = nonce.FindStringSubmatch(req.Prompt)[1]
 		case "tool":
 			city := strings.TrimSuffix(strings.TrimPrefix(req.Prompt, "What is the weather in "), " right now? Use the tool.")
 			c.ToolCalls = []ToolCall{{Name: toolNameOf(req), Arguments: `{"city":"` + city + `"}`}}
@@ -196,12 +192,12 @@ func itemOf(r *Report, key string) Item {
 
 func TestRunIdentifiesModels(t *testing.T) {
 	ctx := context.Background()
-	// 真 sol：指纹、sol / astra 区分、分词、结构化、指令都通过
+	// 真 sol：指纹、sol / astra 区分、分词、工具、指令都通过
 	r, err := Run(ctx, fakeUpstream(t, "gpt-6.1-sol", 1), Spec{Baseline: "gpt-6.1-sol", Quick: true, Seed: 11}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"tokens", "fingerprint", "pair", "structured", "instruction"} {
+	for _, k := range []string{"tokens", "fingerprint", "pair", "tool", "instruction"} {
 		if it := itemOf(r, k); it.Status != Pass {
 			t.Errorf("真 sol 的 %s 应通过: %+v", k, it)
 		}
@@ -302,10 +298,8 @@ func TestNeedleInFullPreset(t *testing.T) {
 }
 
 // fakeClaude 模拟一个 Claude 渠道。real 为 true 时按官方 Messages 格式作答；false 模拟把别家模型转成 Anthropic 格式的中转：
-// 编号不是 msg_、没有 thinking、用量缺官方字段、PDF 读不了。
+// 编号不是 msg_、没有 thinking、用量缺官方字段。
 func fakeClaude(real bool) Caller {
-	pdfCode := regexp.MustCompile(`check code (\w+)`)
-	tag := regexp.MustCompile(`<[a-z0-9]{20}>`)
 	return func(_ context.Context, req Request) Call {
 		c := Call{UsageReported: true, Done: true, FinishReason: "end_turn", ID: "msg_011CgXItest", Model: "claude-opus-5-5", InputTokens: 90, OutputTokens: 20,
 			EventTypes:  []string{"message_start", "content_block_start", "ping", "content_block_delta", "content_block_stop", "message_delta", "message_stop"},
@@ -328,15 +322,6 @@ func fakeClaude(real bool) Caller {
 			} else {
 				c.Text = "Hello there!\n" + regexp.MustCompile(`\[\[END-[0-9a-f]+\]\]`).FindString(req.System)
 			}
-		case "document":
-			raw, _ := base64.StdEncoding.DecodeString(req.Document)
-			if m := pdfCode.FindStringSubmatch(string(raw)); real && m != nil {
-				c.Text = "Lingshu check code " + m[1]
-			} else {
-				c.Text = "I can't see any attachment."
-			}
-		case "echo":
-			c.Text = tag.FindString(req.Prompt)
 		default:
 			c.Text = "ok"
 		}
@@ -357,7 +342,7 @@ func TestProtocolCheckForClaude(t *testing.T) {
 	if r.Mode != "protocol" {
 		t.Errorf("mode = %q", r.Mode)
 	}
-	for _, k := range []string{"protocol_format", "tool", "instruction", "document", "injection"} {
+	for _, k := range []string{"protocol_format", "tool", "instruction", "injection"} {
 		if it := itemOf(r, k); it.Status != Pass {
 			t.Errorf("真 Claude 的 %s 应通过: %+v", k, it)
 		}
@@ -365,15 +350,12 @@ func TestProtocolCheckForClaude(t *testing.T) {
 	if it := itemOf(r, "reasoning"); it.Status != Warn { // 有推理但模拟上游答错：没有官方样本，只记需关注
 		t.Errorf("推理: %+v", it)
 	}
-	// 格式转换冒充：协议、推理、文档都不通过
+	// 格式转换冒充：协议、推理不通过
 	r, _ = Run(context.Background(), fakeClaude(false), spec, nil)
 	for _, k := range []string{"protocol_format", "reasoning"} {
 		if it := itemOf(r, k); it.Status != Fail {
 			t.Errorf("格式转换冒充的 %s 应不通过: %+v", k, it)
 		}
-	}
-	if it := itemOf(r, "document"); it.Status != Warn || !strings.Contains(it.Summary, "没读出 PDF") {
-		t.Errorf("文档: %+v", it)
 	}
 	if !strings.HasPrefix(r.Verdict, "不达标") {
 		t.Errorf("总结论: %s", r.Verdict)
@@ -447,7 +429,7 @@ func TestClaudeWithBaseline(t *testing.T) {
 	if r.Mode != "" {
 		t.Errorf("有官方样本时不是协议检测: %q", r.Mode)
 	}
-	for _, k := range []string{"protocol_format", "tokens", "fingerprint", "instruction", "document"} {
+	for _, k := range []string{"protocol_format", "tokens", "fingerprint", "instruction"} {
 		if it := itemOf(r, k); it.Status != Pass {
 			t.Errorf("真 Opus 的 %s 应通过: %+v", k, it)
 		}
@@ -559,7 +541,7 @@ func TestToolNameIsRandom(t *testing.T) {
 				names = append(names, c.ToolCalls[0].Name)
 			}
 		}
-		if it := itemOf(r, "structured"); it.Status != Pass {
+		if it := itemOf(r, "tool"); it.Status != Pass {
 			t.Errorf("回对随机工具名应通过: %+v", it)
 		}
 	}
@@ -574,7 +556,7 @@ func TestToolNameIsRandom(t *testing.T) {
 		return c
 	}
 	r, _ := Run(context.Background(), hardcoded, Spec{Baseline: "gpt-6.1-sol", Quick: true, Seed: 110}, nil)
-	if it := itemOf(r, "structured"); it.Status == Pass {
+	if it := itemOf(r, "tool"); it.Status == Pass {
 		t.Errorf("写死 get_weather 不应通过: %+v", it)
 	}
 }

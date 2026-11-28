@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,9 +40,8 @@ type probeUpstreamRequest struct {
 }
 
 var (
-	probeOnlyWord = regexp.MustCompile(`single word (\w+)`)
-	probeMarker   = regexp.MustCompile(`\[\[END-[0-9a-f]+\]\]`)
-	probeExact    = regexp.MustCompile(`Use exactly (\{.*\})`)
+	probeOnlyWord = regexp.MustCompile(`(?:Your only allowed reply is|respond with|must be exactly|Respond only with the code) ([a-z]{6})[ .,]`)
+	probeMarker   = regexp.MustCompile(`\[\[[a-z]{8}\]\]`)
 )
 
 func newProbeUpstream(t *testing.T) *probeUpstream {
@@ -57,6 +57,12 @@ func (up *probeUpstream) url() string { return up.server.URL }
 func (up *probeUpstream) setStatus(status int) {
 	up.mu.Lock()
 	up.status = status
+	up.mu.Unlock()
+}
+
+func (up *probeUpstream) setScript(script func(http.ResponseWriter, probeUpstreamRequest) bool) {
+	up.mu.Lock()
+	up.script = script
 	up.mu.Unlock()
 }
 
@@ -159,22 +165,62 @@ func probeJSONText(value any) string {
 	return ""
 }
 
-func probeAnswer(system, prompt string) string {
+func probeAnswer(system string) string {
 	if m := probeOnlyWord.FindStringSubmatch(system); m != nil {
 		return m[1]
 	}
 	if m := probeMarker.FindStringSubmatch(system); m != nil {
 		return "Hello!\n" + m[0]
 	}
-	if m := probeExact.FindStringSubmatch(prompt); m != nil {
-		return m[1]
-	}
 	return "47"
+}
+
+func assertQualityInstructionWire(t *testing.T, requests []probeUpstreamRequest, messages bool) {
+	t.Helper()
+	count := 0
+	for _, request := range requests {
+		var system, user string
+		budget := "max_output_tokens"
+		if messages {
+			budget = "max_tokens"
+			system = probeJSONText(request.body["system"])
+			items, _ := request.body["messages"].([]any)
+			for _, raw := range items {
+				item, _ := raw.(map[string]any)
+				if item["role"] == "user" {
+					user = probeJSONText(item["content"])
+				}
+			}
+		} else {
+			items, _ := request.body["input"].([]any)
+			for _, raw := range items {
+				item, _ := raw.(map[string]any)
+				switch item["role"] {
+				case "developer":
+					system += probeJSONText(item["content"])
+				case "user":
+					user = probeJSONText(item["content"])
+				}
+			}
+		}
+		if !probeOnlyWord.MatchString(system) && !probeMarker.MatchString(system) {
+			continue
+		}
+		count++
+		limit, _ := request.body[budget].(float64)
+		reasoning, _ := request.body["reasoning"].(map[string]any)
+		if user == "" || probeOnlyWord.MatchString(user) || probeMarker.MatchString(user) || limit < 1024 || reasoning["effort"] != nil || request.body["thinking"] != nil {
+			t.Errorf("指令题的角色或预算不符: system=%q user=%q budget=%v reasoning=%v", system, user, limit, reasoning)
+		}
+	}
+	if count != 2 {
+		t.Errorf("实际协议中的指令题有 %d 道，期望 2 道", count)
+	}
 }
 
 func (up *probeUpstream) serveChat(w http.ResponseWriter, send func(string), body map[string]any) {
 	system, prompt := probeChatPrompt(body)
-	answer := probeAnswer(system, prompt)
+	answer := probeAnswer(system)
 	if tools, ok := body["tools"].([]any); ok && len(tools) > 0 {
 		tool, _ := tools[0].(map[string]any)
 		fn, _ := tool["function"].(map[string]any)
@@ -204,7 +250,7 @@ func (up *probeUpstream) serveResponses(w http.ResponseWriter, send func(string)
 			}
 		}
 	}
-	answer := probeAnswer(system, prompt)
+	answer := probeAnswer(system)
 	output := []any{}
 	if tools, ok := body["tools"].([]any); ok && len(tools) > 0 {
 		tool, _ := tools[0].(map[string]any)
@@ -228,7 +274,7 @@ func (up *probeUpstream) serveMessages(w http.ResponseWriter, send func(string),
 		}
 	}
 	prompt = probeJSONText(body["messages"])
-	answer := probeAnswer(system, prompt)
+	answer := probeAnswer(system)
 	if tools, ok := body["tools"].([]any); ok && len(tools) > 0 {
 		tool, _ := tools[0].(map[string]any)
 		name := probeBodyString(tool, "name")
@@ -649,13 +695,13 @@ func TestProbeQualityGPT(t *testing.T) {
 		t.Fatalf("质量测试结果不对: %+v", run)
 	}
 	probeReportContract(t, run)
-	for _, key := range []string{"tokens", "structured", "instruction", "needle_answer", "cache", "tool"} {
+	for _, key := range []string{"availability", "model_mix", "tokens", "instruction", "needle_answer", "cache", "tool"} {
 		if probeItemStatus(run, key) == "" {
 			t.Errorf("缺少检测项 %s", key)
 		}
 	}
 	requests := up.snapshot()
-	if len(requests) != 35 || len(run.Report.Calls) != 34 {
+	if len(requests) != 39 || len(run.Report.Calls) != 38 {
 		t.Fatalf("请求数 %d，报告 %d", len(requests), len(run.Report.Calls))
 	}
 	assertProbeAuth(t, requests)
@@ -666,6 +712,7 @@ func TestProbeQualityGPT(t *testing.T) {
 	}
 	up.assertFullDisguise(t, "private-codex-template")
 	assertQualityReasoningSessions(t, requests, run.Report.Calls, 10)
+	assertQualityInstructionWire(t, requests, false)
 	var logs int
 	e.store.Pool.QueryRow(context.Background(), `SELECT count(*) FROM request_logs`).Scan(&logs)
 	if logs != 0 {
@@ -759,6 +806,7 @@ func TestProbeQualityClaude(t *testing.T) {
 	}
 	up.assertFullDisguise(t, "private-claude-template")
 	assertQualityReasoningSessions(t, requests, run.Report.Calls, 4)
+	assertQualityInstructionWire(t, requests, true)
 }
 
 func TestProbePartialReportOnQuotaError(t *testing.T) {
@@ -887,7 +935,7 @@ func TestProbeV3QualityReliableAbnormalityThenQuotaStop(t *testing.T) {
 		t.Errorf("报告 key ID = %d，期望实际选中的渠道 key %d", run.Report.ChannelKeyID, keyID)
 	}
 	assertProbeAuth(t, up.snapshot())
-	if expected := (probe.RunCounts{Planned: 34, Sent: 33, Completed: 30, Failed: 3, Skipped: 1}); run.Report.Counts != expected {
+	if expected := (probe.RunCounts{Planned: 38, Sent: 37, Completed: 34, Failed: 3, Skipped: 1}); run.Report.Counts != expected {
 		t.Fatalf("中止报告应保留已完成样本和缺测计数: %+v", run.Report.Counts)
 	}
 	if len(run.Report.Calls) != run.Report.Counts.Planned {
@@ -914,7 +962,7 @@ func TestProbeV3QualityReliableAbnormalityThenQuotaStop(t *testing.T) {
 }
 
 // TestProbeV3QualityEmptyReport：合成夹具——所有请求都返回内容为空、没有推理用量的响应。
-// 断言生成空报告而不是失败提示或总分，缺测记成无法判定，计数仍完整。
+// 断言空响应在预检停机，并保存不可判定的报告和未调度计数。
 func TestProbeV3QualityEmptyReport(t *testing.T) {
 	e := newEnv(t)
 	up := newProbeUpstream(t)
@@ -925,14 +973,14 @@ func TestProbeV3QualityEmptyReport(t *testing.T) {
 	}
 	a, id, keyID := startV3ProbeRun(t, e, up)
 	run := waitProbeRun(t, a, id)
-	if run.Status != "done" || run.Report.StopReason != "" {
-		t.Fatalf("空报告应正常完成: status=%s stop=%q", run.Status, run.Report.StopReason)
+	if run.Status != "failed" || run.Report.StopReason != "preflight_failed" {
+		t.Fatalf("空响应应在预检后中止: status=%s stop=%q", run.Status, run.Report.StopReason)
 	}
 	probeReportContract(t, run)
 	if run.Report.ChannelKeyID != keyID {
 		t.Errorf("报告 key ID = %d，期望实际选中的渠道 key %d", run.Report.ChannelKeyID, keyID)
 	}
-	if expected := (probe.RunCounts{Planned: 34, Sent: 34, Failed: 34}); run.Report.Counts != expected {
+	if expected := (probe.RunCounts{Planned: 38, Sent: 3, Failed: 3, Skipped: 35}); run.Report.Counts != expected {
 		t.Errorf("空报告计数不对: %+v", run.Report.Counts)
 	}
 	if len(run.Report.Calls) != run.Report.Counts.Planned {
@@ -971,7 +1019,34 @@ func TestProbeV3ProtocolToolAdmission(t *testing.T) {
 	if status := probeItemStatus(run, "tool"); status != "pass" {
 		t.Errorf("工具调用应单独通过，实际 %q", status)
 	}
-	if status := probeItemStatus(run, "structured"); status != "pass" {
-		t.Errorf("结构化输出应单独通过，实际 %q", status)
+	for _, key := range []string{"structured", "document", "echo"} {
+		if status := probeItemStatus(run, key); status != "" {
+			t.Errorf("新报告不应有 %s: %q", key, status)
+		}
+	}
+}
+
+// TestProbeV3ThrottleRetryAfterZero：显式 Retry-After: 0 让本轮暂停立即结束，
+// 529 之后仍能把余下请求发完，不会因为缺省 20 秒暂停拖住检测。
+func TestProbeV3ThrottleRetryAfterZero(t *testing.T) {
+	e := newEnv(t)
+	up := newProbeUpstream(t)
+	var throttled atomic.Bool
+	up.setScript(func(w http.ResponseWriter, request probeUpstreamRequest) bool {
+		if request.header.Get("Session-Id") == "" || !throttled.CompareAndSwap(false, true) {
+			return false
+		}
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(529)
+		fmt.Fprint(w, `{"error":{"message":"overloaded"}}`)
+		return true
+	})
+	a, id, _ := startV3ProbeRun(t, e, up)
+	run := waitProbeRun(t, a, id)
+	if run.Status != "done" || run.Report.Counts.Sent != 38 || len(up.snapshot()) != 39 {
+		t.Fatalf("显式 Retry-After 0 应继续发完请求: %+v", run.Report.Counts)
+	}
+	if !throttled.Load() {
+		t.Fatal("夹具应至少触发一次 529")
 	}
 }

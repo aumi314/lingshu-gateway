@@ -2,6 +2,7 @@ package probe
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 )
@@ -89,9 +90,13 @@ func attemptError(c Call, missingContent bool) string {
 	case c.HTTPStatus == http.StatusTooManyRequests || strings.Contains(msg, "rate_limit") || strings.Contains(msg, "too many requests"):
 		return "rate_limit"
 	case gatewayError(c):
-		return "gateway_error"
+		return "timeout"
 	case c.HTTPStatus == http.StatusForbidden && strings.Contains(msg, "policy_blocked"):
 		return "blocked"
+	case c.HTTPStatus == http.StatusForbidden || c.HTTPStatus == http.StatusUnauthorized || c.FinishReason == "refusal" || c.FinishReason == "content_filter":
+		return "refused"
+	case c.HTTPStatus == http.StatusRequestTimeout:
+		return "timeout"
 	case c.HTTPStatus >= 300:
 		return "http_error"
 	case c.AttemptError != "":
@@ -129,13 +134,59 @@ func summarizeAttempts(byQuestion [][]Attempt, scheduled, cancelled []bool) ([]A
 		if question[0].Usable {
 			summary.FirstUsable++
 		}
-		for _, attempt := range question {
-			if attempt.Usable {
-				summary.FinalUsable++
-				break
-			}
+		if questionUsable(question) {
+			summary.FinalUsable++
 		}
 	}
 	summary.Sends = len(attempts)
 	return attempts, &summary
+}
+
+func questionUsable(question []Attempt) bool {
+	return len(question) > 0 && question[len(question)-1].Usable
+}
+
+const minAvailabilityQuestions = 10
+const minAvailabilityPercent = 80
+
+type availabilityProgress struct {
+	completed, usable int
+	failed            bool
+}
+
+func (body availabilityProgress) abnormal() bool {
+	return body.completed >= minAvailabilityQuestions && body.usable*100 < body.completed*minAvailabilityPercent
+}
+
+func qualityAvailabilityItem(attempts []Attempt, stats *Availability, body availabilityProgress) Item {
+	failures := map[string]int{}
+	for _, attempt := range attempts {
+		if attempt.ErrorType != "" && attempt.ErrorType != "cancelled" {
+			failures[attempt.ErrorType]++
+		}
+	}
+	item := Item{Key: "availability", Status: Unknown, Details: map[string]any{
+		"sent_questions": stats.SentQuestions, "first_usable": stats.FirstUsable, "final_usable": stats.FinalUsable,
+		"sends": stats.Sends, "cancelled": stats.Cancelled, "unscheduled": stats.Unscheduled,
+		"body_completed": body.completed, "body_usable": body.usable, "failure_counts": failures,
+	}}
+	if body.failed || body.abnormal() {
+		item.Status = Fail
+	} else if body.completed >= minAvailabilityQuestions {
+		item.Status = Pass
+	}
+	if stats.SentQuestions == 0 {
+		item.Summary = "没测成：本轮没有实发请求"
+		return item
+	}
+	first := float64(stats.FirstUsable) / float64(stats.SentQuestions)
+	final := float64(stats.FinalUsable) / float64(stats.SentQuestions)
+	item.Details["first_usable_rate"], item.Details["final_usable_rate"] = first, final
+	item.Summary = fmt.Sprintf("首次可用 %.1f%%（%d/%d），最终可用 %.1f%%（%d/%d），实发 %d 次", 100*first, stats.FirstUsable, stats.SentQuestions, 100*final, stats.FinalUsable, stats.SentQuestions, stats.Sends)
+	if item.Status == Fail {
+		item.Summary += "；主体最终可用率低于 80%"
+	} else if item.Status == Unknown {
+		item.Summary += "；主体未完成 10 题，未作判定"
+	}
+	return item
 }

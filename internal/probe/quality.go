@@ -29,7 +29,7 @@ func reportBaselineID(spec Spec, baselines map[string]*Baseline) string {
 	return fmt.Sprintf("%s@%x", spec.Baseline, hash[:6])
 }
 
-func (p *plan) reportQuality(calls []Call, base *Baseline) *Report {
+func (p *plan) reportQuality(calls []Call, base *Baseline, availability Item) *Report {
 	by := map[string][]Call{}
 	for _, call := range calls {
 		by[call.Item] = append(by[call.Item], call)
@@ -51,10 +51,18 @@ func (p *plan) reportQuality(calls []Call, base *Baseline) *Report {
 		}
 		r.Rules = append(r.Rules, rule)
 	}
+	add(availability)
 	anchors := by["anchor"]
+	mixAnchors := by["mix_anchor"]
+	if len(p.tokenNames) > 0 {
+		anchors = by["tokens"][:min(3, len(by["tokens"]))]
+		mixAnchors = append(mixAnchors, anchors[:min(2, len(anchors))]...)
+	} else {
+		mixAnchors = append(mixAnchors, anchors...)
+	}
+	add(p.qualityModelMix(calls, mixAnchors))
 	if len(p.tokenNames) > 0 {
 		add(p.judgeTokens(by["tokens"], base))
-		anchors = by["tokens"][:min(3, len(by["tokens"]))]
 	}
 	for _, item := range p.qualityReasoning(by["reasoning"], base) {
 		add(item)
@@ -63,23 +71,11 @@ func (p *plan) reportQuality(calls []Call, base *Baseline) *Report {
 	answer, usage := p.qualityNeedle(by["needle"])
 	add(answer)
 	add(usage)
-	add(qualityRequests(calls))
-	add(qualitySessions(calls, anchors))
 	r.Blocks[0].Verdict = qualityVerdict(r.Blocks[0].Items)
 	r.Verdict = r.Blocks[0].Verdict
 	add(qualityCache(calls, p.protocol))
 	add(qualityInjection(anchors, p.spec))
 	add(p.qualityTool(by["tool"]))
-	if p.protocol {
-		add(checkQualityAnswer("document", by["document"], "读出了 PDF 中的编号", "未找到 PDF 中的编号 "+p.docCode, func(c Call) bool {
-			return strings.Contains(strings.ToUpper(c.Text), p.docCode)
-		}))
-		add(checkQualityAnswer("echo", by["echo"], "尖括号标签原样输出", "未原样输出 "+p.echoTag, func(c Call) bool {
-			return strings.TrimSpace(c.Text) == p.echoTag
-		}))
-	} else {
-		add(p.qualityStructured(by["structured"]))
-	}
 	add(p.qualityProtocol(calls))
 	for _, item := range observe(qualityCompleted(calls), nil, nil, nil, nil) {
 		if item.Key == "invisible" || item.Key == "search" {
@@ -104,11 +100,11 @@ func qualityCallIssue(c Call) string {
 		return c.FinishReason
 	}
 	switch c.Item {
-	case "reasoning", "instruction", "needle", "document", "echo", "structured", "tool":
+	case "reasoning", "instruction", "needle", "tool":
 		if clean(c.Text) == "" && len(c.ToolCalls) == 0 {
 			return "上游未返回作答内容"
 		}
-	case "anchor", "tokens", "chain":
+	case "anchor", "tokens", "chain", "mix_anchor":
 		if !c.InputReported && clean(c.Text) == "" {
 			return "上游未返回作答内容或输入用量"
 		}
@@ -126,77 +122,16 @@ func qualityCompleted(calls []Call) []Call {
 	return completed
 }
 
-func qualityRequests(calls []Call) Item {
-	complete, failed, blocked, quota, cancelled := 0, 0, 0, 0, 0
-	for _, call := range calls {
-		msg := strings.ToLower(qualityCallIssue(call))
-		switch {
-		case msg == "":
-			complete++
-		case quotaError(call, msg):
-			quota++
-		case policyBlocked(call):
-			blocked++
-		case msg == "检测已取消" || msg == "超时或被取消" || msg == "cancelled" || strings.Contains(msg, "context canceled"):
-			cancelled++
-		default:
-			failed++
-		}
-	}
-	return Item{Key: "requests", Status: Info, Summary: fmt.Sprintf("测成 %d，失败 %d，拦截 %d，额度错误 %d，取消 %d", complete, failed, blocked, quota, cancelled),
-		Details: map[string]any{"completed": complete, "failed": failed, "blocked": blocked, "quota": quota, "cancelled": cancelled}}
-}
-
-func qualitySessions(calls, anchors []Call) Item {
-	type session struct {
-		Session      int            `json:"session"`
-		Completed    int            `json:"completed"`
-		Models       map[string]int `json:"models"`
-		IDPrefixes   map[string]int `json:"id_prefixes"`
-		ServiceTiers map[string]int `json:"service_tiers"`
-		AnchorInputs []int64        `json:"anchor_input_tokens,omitempty"`
-	}
-	bySession := map[int]*session{}
-	var rows []*session
-	for _, call := range calls {
-		if call.Error == "检测已取消" {
-			continue
-		}
-		row := bySession[call.Session]
-		if row == nil {
-			row = &session{Session: call.Session, Models: map[string]int{}, IDPrefixes: map[string]int{}, ServiceTiers: map[string]int{}}
-			bySession[call.Session] = row
-			rows = append(rows, row)
-		}
-		if qualityCallIssue(call) == "" {
-			row.Completed++
-			row.Models[orDash(call.Model)]++
-			row.IDPrefixes[idPrefix(call.ID)]++
-			row.ServiceTiers[orDash(call.ServiceTier)]++
-		}
-	}
-	for _, call := range anchors {
-		if row := bySession[call.Session]; row != nil && qualityCallIssue(call) == "" && call.InputReported {
-			row.AnchorInputs = append(row.AnchorInputs, call.InputTokens)
-		}
-	}
-	completed := 0
-	for _, row := range rows {
-		if row.Completed > 0 {
-			completed++
-		}
-	}
-	return Item{Key: "sessions", Status: Info, Summary: fmt.Sprintf("实发覆盖 %d 个会话，%d 个取得完整响应；明细展示各会话的响应字段和基准输入", len(rows), completed), Details: map[string]any{"sessions": rows}}
-}
-
 func unavailableQualityCall(calls []Call) string {
 	if len(calls) == 0 {
 		return "没有样本"
 	}
 	c := calls[0]
 	switch {
-	case policyBlocked(c):
+	case attemptError(c, false) == "blocked":
 		return "请求被拦截（HTTP 403）"
+	case attemptError(c, false) == "refused":
+		return "请求被拒绝，原因不明"
 	case quotaError(c, strings.ToLower(qualityCallIssue(c))):
 		return "请求遇到额度错误"
 	case gatewayError(c):
@@ -217,23 +152,6 @@ func checkQualityAnswer(key string, calls []Call, passed, failed string, valid f
 		it.Details = map[string]any{"answer": truncate(clean(c.Text), 200), "tool_calls": c.ToolCalls}
 	}
 	return it
-}
-
-func (p *plan) qualityInstruction(calls []Call) Item {
-	word, marker := calls[:min(1, len(calls))], calls[min(1, len(calls)):]
-	wordCheck := checkQualityAnswer("instruction", word, "按系统提示只回复指定词", "未按系统提示只回复 "+p.onlyWord, func(c Call) bool {
-		return strings.EqualFold(strings.Trim(clean(c.Text), ".!。 "), p.onlyWord)
-	})
-	markerCheck := checkQualityAnswer("instruction", marker, "按系统提示加上结尾标记", "未按系统提示加上结尾标记", func(c Call) bool {
-		return strings.HasSuffix(clean(c.Text), p.marker)
-	})
-	status := Pass
-	if wordCheck.Status == Fail || markerCheck.Status == Fail {
-		status = Fail
-	} else if wordCheck.Status == Unknown || markerCheck.Status == Unknown {
-		status = Unknown
-	}
-	return Item{Key: "instruction", Status: status, Summary: "指定词：" + wordCheck.Summary + "；结尾标记：" + markerCheck.Summary}
 }
 
 func (p *plan) qualityNeedle(calls []Call) (Item, Item) {
@@ -268,17 +186,6 @@ func (p *plan) qualityNeedle(calls []Call) (Item, Item) {
 		}
 	}
 	return answer, usage
-}
-
-func (p *plan) qualityStructured(calls []Call) Item {
-	return checkQualityAnswer("structured", calls, "JSON 格式、字段类型和校验值符合要求", "返回内容未匹配 JSON 结构或校验值", func(c Call) bool {
-		var fields map[string]json.RawMessage
-		var nonce string
-		var value int
-		return json.Unmarshal([]byte(clean(c.Text)), &fields) == nil && len(fields) == 2 &&
-			json.Unmarshal(fields["nonce"], &nonce) == nil && nonce == p.nonce &&
-			json.Unmarshal(fields["value"], &value) == nil && value == p.nonceValue
-	})
 }
 
 var weatherCountries = map[string]string{
@@ -352,7 +259,7 @@ func qualityMetrics(calls []Call, messages bool) (map[string]any, Item) {
 			if tokensSeen > 3 {
 				continue
 			}
-		case "anchor", "instruction", "structured", "echo":
+		case "anchor", "instruction":
 		default:
 			continue
 		}

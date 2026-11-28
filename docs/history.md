@@ -884,3 +884,9 @@ DMIT 模型 ID 1 `deepseek-v4.1-flash` 在保留周末谷价的基础上补齐 U
 
 - 报告新增 `attempts` 和 `availability`，原答卷与规则版本保留；费用按真实尝试估算，失败有用量也计入。老报告无需迁移。本地验证：构建、全仓 `go vet`、probe 单测、无监听端口的 relay 测试、前端类型检查通过。
 - API 和浏览器待跑：`go test ./internal/api -run '^TestProbe' -count=1`（含 `TestProbeFailedAttemptCostWithCacheWrite`），`node web/tests/probes.browser.cjs`（含可用率、零分母、历史报告）。
+
+## 2026-11-28 · 渠道检测第二阶段
+
+- 质量规则升至 `quality-v3.2`，报告格式仍是 v3。可请求性和混池放在能力块开头；指令题换成随机暗号冲突和结尾标记对照。旧规则的指定词、结构化输出、PDF 和尖括号原样输出结果仍可在旧报告读取。
+- 短基准随递推会话补测，仍按各题独立作答。GPT 去掉 1 道旧题、补 5 次短基准；Claude 去掉 2 道旧题、补 2 次短基准。
+- 离线验收：Go 构建、全仓 `go vet`、probe 单测和无监听 relay 单测通过。API 用例交 Claude 跑：`go test ./internal/api -run '^TestProbe' -count=1`，含两协议真实出站角色、额度停机、预检全空、旧项移除和 `Retry-After: 0`。本阶段未运行 Postgres、Docker、本地监听或浏览器。
