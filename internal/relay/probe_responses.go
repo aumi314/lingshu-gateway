@@ -136,7 +136,7 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 	}
 
 	tracker := usage.NewTracker(usage.Responses)
-	qualityReasoning := req.Item == "reasoning" && req.DisguiseSet && req.FullDisguise
+	quality := req.DisguiseSet && req.FullDisguise
 	var out strings.Builder
 	type item struct {
 		Type      string `json:"type"`
@@ -182,6 +182,7 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 			if ev.Delta != "" && c.FirstTokenMS == 0 {
 				c.FirstTokenMS = max(int(time.Since(start).Milliseconds()), 1)
 			}
+			c.RecordVisible(ev.Delta, time.Since(start))
 			out.WriteString(ev.Delta)
 		case "response.function_call_arguments.delta":
 			if c.FirstTokenMS == 0 {
@@ -190,7 +191,7 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 		case "response.completed", "response.incomplete":
 			c.Done = ev.Type == "response.completed"
 			c.FinishReason = ev.Response.Status
-			if qualityReasoning && !c.Done {
+			if quality && !c.Done {
 				c.FinishReason = "incomplete"
 			}
 			final = ev.Response.Output
@@ -209,7 +210,7 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 		for {
 			ev, err := reader.Next()
 			if err != nil {
-				if qualityReasoning && c.Error == "" && !errors.Is(err, io.EOF) {
+				if quality && c.Error == "" && !c.Done && !errors.Is(err, io.EOF) {
 					c.Error = "读取流失败: " + err.Error()
 				}
 				break
@@ -220,7 +221,7 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 		}
 	} else { // 要了流式却回了整段 JSON：按 response 对象解析，Done 记为 false，请求质量里会提示
 		b, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-		if qualityReasoning && err != nil {
+		if quality && err != nil {
 			c.Error = "读取响应失败: " + err.Error()
 		}
 		tracker.ObserveBody(b)
@@ -253,7 +254,12 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 	if tracker.Seen() {
 		u := tracker.Result()
 		c.UsageReported = true
+		reportedInput, inputReported := tracker.ReportedInput()
+		c.InputReported, c.CacheReported = inputReported, tracker.CacheReadReported()
 		c.InputTokens = u.Input + u.CacheRead
+		if quality && inputReported {
+			c.InputTokens = reportedInput
+		}
 		c.CachedTokens = u.CacheRead
 		c.OutputTokens = u.Output
 		c.ReasoningTokens = u.Reasoning

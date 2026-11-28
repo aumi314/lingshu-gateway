@@ -42,7 +42,8 @@ type Channel struct {
 	Template         string         `json:"template"`
 	Note             string         `json:"note"`
 	APIKey           string         `json:"api_key,omitempty"` // 只用于拉取模型、冒烟测试和旧客户端保存（等于只有一把 key），读取时为空
-	APIKeyMasked     string         `json:"api_key_masked"`    // 第一把启用的 key 的掩码
+	SecretKeyID      int64          `json:"-"`
+	APIKeyMasked     string         `json:"api_key_masked"` // 第一把启用的 key 的掩码
 	Keys             []ChannelKey   `json:"keys"`
 	TestKeyID        int64          `json:"test_key_id,omitempty"`  // 冒烟测试指定用哪把 key，0 表示第一把启用的
 	KeysDeduped      int            `json:"keys_deduped,omitempty"` // 保存时自动去掉的重复 key 数（只出现在保存的响应里）
@@ -146,11 +147,13 @@ func (s *Store) ListChannels(ctx context.Context) ([]*Channel, error) {
 	return out, mrows.Err()
 }
 
-// ChannelSecret 返回渠道的完整配置，APIKey 是第一把启用的 key；只给服务器内部用（拉取模型、冒烟测试、模型检测）。
+// ChannelSecret 返回渠道的完整配置及同一把启用 key 的密钥和编号，仅供服务器内部使用。
 func (s *Store) ChannelSecret(ctx context.Context, id int64) (*Channel, error) {
 	var c Channel
-	err := s.Pool.QueryRow(ctx, `SELECT c.id, c.name, c.template, COALESCE((SELECT k.api_key FROM channel_keys k WHERE k.channel_id = c.id AND k.enabled ORDER BY k.sort_order, k.id LIMIT 1), ''), c.base_url_chat, c.base_url_messages, c.base_url_responses, c.base_url_systemone, c.proxy_url
-		FROM channels c WHERE c.id = $1`, id).Scan(&c.ID, &c.Name, &c.Template, &c.APIKey, &c.BaseURLChat, &c.BaseURLMessages, &c.BaseURLResponses, &c.BaseURLSystemOne, &c.ProxyURL)
+	err := s.Pool.QueryRow(ctx, `SELECT c.id, c.name, c.template, COALESCE(selected.api_key, ''), COALESCE(selected.id, 0), c.base_url_chat, c.base_url_messages, c.base_url_responses, c.base_url_systemone, c.proxy_url
+		FROM channels c LEFT JOIN LATERAL (
+			SELECT k.id, k.api_key FROM channel_keys k WHERE k.channel_id = c.id AND k.enabled ORDER BY k.sort_order, k.id LIMIT 1
+		) selected ON true WHERE c.id = $1`, id).Scan(&c.ID, &c.Name, &c.Template, &c.APIKey, &c.SecretKeyID, &c.BaseURLChat, &c.BaseURLMessages, &c.BaseURLResponses, &c.BaseURLSystemOne, &c.ProxyURL)
 	if err != nil {
 		return nil, translate(err)
 	}

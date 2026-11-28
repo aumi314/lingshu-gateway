@@ -232,11 +232,7 @@ func (p *plan) reportProtocol(calls []Call) *Report {
 		fp, hint, nearest = p.judgeFingerprint(by["fingerprint"])
 		r.Items = append(r.Items, fp)
 	}
-	if p.legacy {
-		r.Items = append(r.Items, p.judgeThinking(by["reasoning"], base))
-	} else {
-		r.Items = append(r.Items, p.judgeQualityReasoning(by["reasoning"], base))
-	}
+	r.Items = append(r.Items, p.judgeThinking(by["reasoning"], base))
 	tool := p.judgeStructured(nil, by["tool"])
 	tool.Key, tool.Title = "tool", "工具调用"
 	if tool.Status == Warn { // judgeStructured 按 json_schema 和工具两项算，这里只有工具一项：做对了就是通过
@@ -258,14 +254,7 @@ func (p *plan) reportProtocol(calls []Call) *Report {
 		r.Items = append(r.Items, it)
 	}
 	anchors := by["anchor"]
-	if !p.legacy && len(by["tokens"]) > 0 {
-		anchors = by["tokens"]
-	}
 	r.Observations = disguiseInjection(observe(calls, anchors[:min(1, len(anchors))], by["anchor"], nil, nearest), p.spec)
-	if !p.legacy {
-		r.Observations = qualityObservations(r.Observations)
-		scoreInjection(r, p.spec)
-	}
 	r.Metrics = metrics(calls)
 	finalize(r, hint)
 	return r

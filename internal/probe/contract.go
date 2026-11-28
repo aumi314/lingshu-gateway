@@ -33,13 +33,3 @@ func NormalizeMode(mode string) string {
 func (s Spec) mode() string {
 	return s.Mode
 }
-
-func qualityObservations(observations []Item) []Item {
-	result := observations[:0]
-	for _, observation := range observations {
-		if observation.Key != "mixed" {
-			result = append(result, observation)
-		}
-	}
-	return result
-}

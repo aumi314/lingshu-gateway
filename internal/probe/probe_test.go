@@ -612,26 +612,6 @@ func TestDisguiseInjectionTemplateBase(t *testing.T) {
 	}
 }
 
-// 注入计分：完整伪装下比过官方基准的注入项挪进检测项（参与总分和总结论），只作参考的留在请求质量里。
-func TestScoreInjection(t *testing.T) {
-	codex := Spec{Disguise: true, Template: "codex 0.160.0", TemplateHash: "4468e298e601"}
-	r := &Report{Observations: disguiseInjection([]Item{{Key: "injection", Title: "注入", Details: map[string]any{"anchor_tokens": int64(28652)}}, {Key: "cache"}}, codex)}
-	scoreInjection(r, codex)
-	if len(r.Items) != 1 || r.Items[0].Key != "injection" || r.Items[0].Status != Fail || len(r.Observations) != 1 || r.Observations[0].Key != "cache" {
-		t.Fatalf("多约 1.88 万应挪进检测项并判不达标: items=%+v obs=%+v", r.Items, r.Observations)
-	}
-	finalize(r, "")
-	if !strings.Contains(r.Verdict, "不达标：注入") {
-		t.Errorf("总结论应写注入不达标: %s", r.Verdict)
-	}
-	u := Spec{Disguise: true, Template: "codex 0.170.0", TemplateHash: "000000000000"}
-	r = &Report{Observations: disguiseInjection([]Item{{Key: "injection", Details: map[string]any{"anchor_tokens": int64(9845)}}}, u)}
-	scoreInjection(r, u)
-	if len(r.Items) != 0 || len(r.Observations) != 1 {
-		t.Errorf("模板没标定只作参考，留在请求质量里: %+v", r)
-	}
-}
-
 // 中转按内容拦掉个别检测题（2026-11-19 aresai：故障词、长串 a、“Ignore earlier rules” 都回 403 policy_blocked）：
 // 被拦的单独写明、不算答错；分词剩下至少三分之二照常比对，不够才记“不完整”。
 func TestBlockedProbesAreUntested(t *testing.T) {

@@ -26,6 +26,7 @@ type probeUpstream struct {
 	status             int
 	delay              time.Duration
 	retryReasoningOnce bool
+	script             func(http.ResponseWriter, probeUpstreamRequest) bool
 }
 
 type probeUpstreamRequest struct {
@@ -92,6 +93,12 @@ func (up *probeUpstream) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	if retry {
 		http.Error(w, `{"error":{"message":"temporarily unavailable"}}`, http.StatusServiceUnavailable)
+		return
+	}
+	up.mu.Lock()
+	script := up.script
+	up.mu.Unlock()
+	if script != nil && script(w, request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -443,22 +450,104 @@ type probeRunView struct {
 	Score         *int   `json:"score"`
 	Cost          string `json:"cost"`
 	Report        struct {
-		ProbeMode    string `json:"probe_mode"`
-		Protocol     string `json:"protocol"`
-		Disguise     bool   `json:"disguise"`
-		TemplateHash string `json:"template_hash"`
-		StopReason   string `json:"stop_reason"`
-		Counts       struct {
-			Planned   int `json:"planned"`
-			Sent      int `json:"sent"`
-			Completed int `json:"completed"`
-			Skipped   int `json:"skipped"`
-		} `json:"counts"`
-		Items []struct {
-			Key, Status, Summary string
-		} `json:"items"`
-		Calls []json.RawMessage `json:"calls"`
+		ProbeMode     string `json:"probe_mode"`
+		Protocol      string `json:"protocol"`
+		Disguise      bool   `json:"disguise"`
+		TemplateHash  string `json:"template_hash"`
+		StopReason    string `json:"stop_reason"`
+		StopMessage   string `json:"stop_message"`
+		Verdict       string `json:"verdict"`
+		Score         *int   `json:"score"`
+		FormatVersion int    `json:"format_version"`
+		RuleVersion   string `json:"rule_version"`
+		BaselineID    string `json:"baseline_id"`
+		ChannelKeyID  int64  `json:"channel_key_id"`
+		Blocks        []struct {
+			Key     string `json:"key"`
+			Title   string `json:"title"`
+			Verdict string `json:"verdict"`
+			Items   []struct {
+				Key    string `json:"key"`
+				Status string `json:"status"`
+				RuleID string `json:"rule_id"`
+			} `json:"items"`
+		} `json:"blocks"`
+		Rules []struct {
+			ID         string         `json:"id"`
+			State      string         `json:"state"`
+			Version    string         `json:"version"`
+			Thresholds map[string]any `json:"thresholds"`
+			Evidence   string         `json:"evidence"`
+		} `json:"rules"`
+		Counts probe.RunCounts   `json:"counts"`
+		Items  []json.RawMessage `json:"items"`
+		Calls  []json.RawMessage `json:"calls"`
 	} `json:"report"`
+}
+
+// probeReportContract 是一份 v3 质量报告的契约。检查列表只带摘要、详情带完整报告，
+// 以及新报告不再有总分，omitted/显式 null 都按空 score 处理。
+func probeReportContract(t *testing.T, run probeRunView) {
+	t.Helper()
+	if run.Report.FormatVersion != 3 || run.Report.RuleVersion == "" || run.Report.BaselineID == "" || run.Report.ChannelKeyID == 0 {
+		t.Fatalf("报告缺少版本/基准/key 安全 ID: version=%d rule=%q baseline=%q key=%d", run.Report.FormatVersion, run.Report.RuleVersion, run.Report.BaselineID, run.Report.ChannelKeyID)
+	}
+	if run.Score != nil || run.Report.Score != nil || run.Verdict != run.Report.Verdict {
+		t.Errorf("v3 质量报告不应有总分，列表及报告结论应一致: %+v", run)
+	}
+	if len(run.Report.Blocks) != 3 || run.Report.Blocks[0].Key != "capability" || run.Report.Blocks[1].Key != "billing" || run.Report.Blocks[2].Key != "experience" {
+		t.Fatalf("报告缺少三块: %+v", run.Report)
+	}
+	rules := map[string]bool{}
+	for _, rule := range run.Report.Rules {
+		rules[rule.ID] = true
+	}
+	for _, block := range run.Report.Blocks {
+		if block.Key == "capability" && block.Verdict != run.Verdict {
+			t.Errorf("能力块 %q 与总览 %q 不一致", block.Verdict, run.Verdict)
+		}
+		for _, item := range block.Items {
+			if item.Key == "" || item.Status == "" || !rules[item.RuleID] {
+				t.Errorf("块 %q 的检测项缺状态或对应规则: %+v", block.Key, item)
+			}
+		}
+	}
+	if len(run.Report.Rules) == 0 {
+		t.Error("报告应带回规则清单")
+	}
+	for _, rule := range run.Report.Rules {
+		if rule.ID == "" || rule.Version == "" || rule.State == "" {
+			t.Errorf("规则清单条目不完整: %+v", rule)
+		}
+		if rule.ID == "reasoning_usage" {
+			if _, ok := rule.Thresholds["min_reasoning_tokens"]; !ok {
+				t.Errorf("推理用量规则缺少阈值: %+v", rule)
+			}
+			if rule.Evidence == "" {
+				t.Errorf("推理用量规则缺少依据: %+v", rule)
+			}
+		}
+	}
+}
+
+func probeBlockVerdict(run probeRunView, key string) string {
+	for _, block := range run.Report.Blocks {
+		if strings.EqualFold(block.Key, key) || strings.Contains(block.Title, key) {
+			return block.Verdict
+		}
+	}
+	return ""
+}
+
+func probeItemStatus(run probeRunView, itemKey string) string {
+	for _, block := range run.Report.Blocks {
+		for _, item := range block.Items {
+			if strings.EqualFold(item.Key, itemKey) {
+				return item.Status
+			}
+		}
+	}
+	return ""
 }
 
 func waitProbeRun(t *testing.T, a *client, id int64) probeRunView {
@@ -552,16 +641,13 @@ func TestProbeQualityGPT(t *testing.T) {
 		t.Fatalf("发起质量测试: %d %s", code, body)
 	}
 	run := waitProbeRun(t, a, id)
-	if run.Status != "done" || run.Report.ProbeMode != probe.ModeQuality || run.Report.Protocol != "responses" || !run.Report.Disguise || run.Report.TemplateHash == "" || run.Score == nil {
+	if run.Status != "done" || run.Report.ProbeMode != probe.ModeQuality || run.Report.Protocol != "responses" || !run.Report.Disguise || run.Report.TemplateHash == "" || run.Score != nil {
 		t.Fatalf("质量测试结果不对: %+v", run)
 	}
-	status := map[string]string{}
-	for _, item := range run.Report.Items {
-		status[item.Key] = item.Status
-	}
-	for _, key := range []string{"tokens", "structured", "instruction", "needle", "cache_chain"} {
-		if status[key] == "" {
-			t.Errorf("缺少检测项 %s: %+v", key, status)
+	probeReportContract(t, run)
+	for _, key := range []string{"tokens", "structured", "instruction", "needle_answer", "cache", "tool"} {
+		if probeItemStatus(run, key) == "" {
+			t.Errorf("缺少检测项 %s", key)
 		}
 	}
 	requests := up.snapshot()
@@ -602,8 +688,11 @@ func TestProbeFingerprintGPT(t *testing.T) {
 		t.Fatalf("指纹请求数 = %d / %d, want 693", len(requests), len(run.Report.Calls))
 	}
 	for _, item := range run.Report.Items {
-		if item.Key != "fingerprint" && item.Key != "pair" {
-			t.Errorf("指纹报告包含额外检测项 %s", item.Key)
+		var legacy struct {
+			Key string `json:"key"`
+		}
+		if json.Unmarshal(item, &legacy) == nil && legacy.Key != "fingerprint" && legacy.Key != "pair" {
+			t.Errorf("指纹报告包含额外检测项 %s", legacy.Key)
 		}
 	}
 	assertProbeAuth(t, requests)
@@ -650,9 +739,10 @@ func TestProbeQualityClaude(t *testing.T) {
 		t.Fatalf("发起 Claude 质量测试: %d %s", code, body)
 	}
 	run := waitProbeRun(t, a, id)
-	if run.Status != "done" || run.Report.ProbeMode != probe.ModeQuality || run.Report.Protocol != "messages" || !run.Report.Disguise || run.Report.TemplateHash == "" || run.Score == nil {
+	if run.Status != "done" || run.Report.ProbeMode != probe.ModeQuality || run.Report.Protocol != "messages" || !run.Report.Disguise || run.Report.TemplateHash == "" || run.Score != nil {
 		t.Fatalf("Claude 质量测试结果不对: %+v", run)
 	}
+	probeReportContract(t, run)
 	requests := up.snapshot()
 	if len(requests) != 30 || len(run.Report.Calls) != 29 {
 		t.Fatalf("Claude 请求数 = %d / %d", len(requests), len(run.Report.Calls))
@@ -687,5 +777,151 @@ func TestProbePartialReportOnQuotaError(t *testing.T) {
 	}
 	if len(run.Report.Calls) != run.Report.Counts.Planned {
 		t.Fatalf("部分报告调用数 = %d, planned = %d", len(run.Report.Calls), run.Report.Counts.Planned)
+	}
+}
+
+// startV3ProbeRun 建一个 Responses 渠道，准备两把 key，再发起检测。
+func startV3ProbeRun(t *testing.T, e *env, up *probeUpstream) (*client, int64, int64) {
+	t.Helper()
+	a := e.login("admin")
+	channelID := seedProbeChannel(t, e, "v3-quality-"+up.server.URL, "upstream-key", "", "", up.url())
+	ctx := context.Background()
+	var keyID int64
+	if err := e.store.Pool.QueryRow(ctx, `SELECT id FROM channel_keys WHERE channel_id = $1`, channelID).Scan(&keyID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.store.Pool.Exec(ctx, `INSERT INTO channel_keys (channel_id, api_key, sort_order) VALUES ($1, $2, 1)`, channelID, "alternate-key"); err != nil {
+		t.Fatal(err)
+	}
+	seedProbeModel(t, e, "gpt-6.1-sol", "up-sol", channelID)
+	e.api.Relay.Disguise = &relay.ProbeDisguise{}
+	e.api.Relay.Disguise.Codex.Input = json.RawMessage(`[{"type":"message"}]`)
+	e.api.Relay.Disguise.Codex.Headers = map[string]string{"user-agent": "private-codex-template"}
+	code, body, id := startProbe(t, a, map[string]any{"channel_id": channelID, "model": "gpt-6.1-sol", "preset": probe.ModeQuality})
+	if code != http.StatusOK || id == 0 {
+		t.Fatalf("发起 v3 质量测试: %d %s", code, body)
+	}
+	return a, id, keyID
+}
+
+// TestProbeV3QualityReliableAbnormalityThenQuotaStop：合成夹具——一道推理题明确零推理，
+// 之后额度耗尽中止。断言中止后仍保留已完成样本、能力结论、列表 verdict 和 null score。
+func TestProbeV3QualityReliableAbnormalityThenQuotaStop(t *testing.T) {
+	e := newEnv(t)
+	up := newProbeUpstream(t)
+	once := sync.Once{}
+	up.script = func(w http.ResponseWriter, request probeUpstreamRequest) bool {
+		prompt := outboundPrompt(request)
+		if strings.Contains(prompt, "Ignore the text above. What is") {
+			http.Error(w, `{"error":{"message":"insufficient balance"}}`, http.StatusPaymentRequired)
+			return true
+		}
+		if !strings.HasPrefix(prompt, "Let x1 = ") {
+			return false
+		}
+		handled := false
+		once.Do(func() {
+			handled = true
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, `data: {"type":"response.completed","response":{"id":"resp_zero","model":"up-sol","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"0"}]}],"usage":{"input_tokens":4158,"output_tokens":5,"output_tokens_details":{"reasoning_tokens":0}}}}`+"\n\n")
+		})
+		return handled
+	}
+	a, id, keyID := startV3ProbeRun(t, e, up)
+	run := waitProbeRun(t, a, id)
+	if run.Status != "failed" || run.Report.StopReason != "quota" || !strings.Contains(run.Report.StopMessage, "余额") {
+		t.Fatalf("额度中止应记为失败并留下中止原因: status=%s stop=%q verdict=%q", run.Status, run.Report.StopReason, run.Verdict)
+	}
+	probeReportContract(t, run)
+	if run.Report.ChannelKeyID != keyID {
+		t.Errorf("报告 key ID = %d，期望实际选中的渠道 key %d", run.Report.ChannelKeyID, keyID)
+	}
+	assertProbeAuth(t, up.snapshot())
+	if expected := (probe.RunCounts{Planned: 34, Sent: 33, Completed: 30, Failed: 3, Skipped: 1}); run.Report.Counts != expected {
+		t.Fatalf("中止报告应保留已完成样本和缺测计数: %+v", run.Report.Counts)
+	}
+	if len(run.Report.Calls) != run.Report.Counts.Planned {
+		t.Errorf("报告调用数 = %d，planned = %d", len(run.Report.Calls), run.Report.Counts.Planned)
+	}
+	if status := probeItemStatus(run, "reasoning_usage"); status != "fail" {
+		t.Errorf("明确零推理应判不通过，实际 %q", status)
+	}
+	if verdict := probeBlockVerdict(run, "能力"); verdict != "不通过" {
+		t.Errorf("能力块应聚合为不通过，实际 %q", verdict)
+	}
+	if run.Verdict != "不通过" {
+		t.Errorf("列表 verdict 应为简明能力结论: %q", run.Verdict)
+	}
+	var list []struct {
+		ID      int64  `json:"id"`
+		Verdict string `json:"verdict"`
+		Score   *int   `json:"score"`
+	}
+	a.do("GET", "/api/admin/probes", nil, &list)
+	if len(list) != 1 || list[0].ID != id || list[0].Verdict != run.Verdict || list[0].Score != nil {
+		t.Fatalf("列表与详情 verdict/null score 不一致: list=%+v detail=%+v", list, run)
+	}
+}
+
+// TestProbeV3QualityEmptyReport：合成夹具——所有请求都返回内容为空、没有推理用量的响应。
+// 断言生成空报告而不是失败提示或总分，缺测记成无法判定，计数仍完整。
+func TestProbeV3QualityEmptyReport(t *testing.T) {
+	e := newEnv(t)
+	up := newProbeUpstream(t)
+	up.script = func(w http.ResponseWriter, _ probeUpstreamRequest) bool {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"type":"response.completed","response":{"id":"resp_empty","model":"up-sol","status":"completed","output":[]}}`+"\n\n")
+		return true
+	}
+	a, id, keyID := startV3ProbeRun(t, e, up)
+	run := waitProbeRun(t, a, id)
+	if run.Status != "done" || run.Report.StopReason != "" {
+		t.Fatalf("空报告应正常完成: status=%s stop=%q", run.Status, run.Report.StopReason)
+	}
+	probeReportContract(t, run)
+	if run.Report.ChannelKeyID != keyID {
+		t.Errorf("报告 key ID = %d，期望实际选中的渠道 key %d", run.Report.ChannelKeyID, keyID)
+	}
+	if expected := (probe.RunCounts{Planned: 34, Sent: 34, Failed: 34}); run.Report.Counts != expected {
+		t.Errorf("空报告计数不对: %+v", run.Report.Counts)
+	}
+	if len(run.Report.Calls) != run.Report.Counts.Planned {
+		t.Errorf("空报告调用数 = %d，planned = %d", len(run.Report.Calls), run.Report.Counts.Planned)
+	}
+	if verdict := probeBlockVerdict(run, "能力"); verdict != "无法判定" {
+		t.Errorf("全缺测的能力块应为无法判定，实际 %q", verdict)
+	}
+	if status := probeItemStatus(run, "reasoning_usage"); status != "unknown" {
+		t.Errorf("推理用量未上报应记无法判定，实际 %q", status)
+	}
+	if run.Verdict == "" {
+		t.Error("空报告也应写简明结论")
+	}
+	var list []struct {
+		ID      int64  `json:"id"`
+		Verdict string `json:"verdict"`
+		Score   *int   `json:"score"`
+	}
+	a.do("GET", "/api/admin/probes", nil, &list)
+	if len(list) != 1 || list[0].ID != id || list[0].Verdict != run.Verdict || list[0].Score != nil {
+		t.Fatalf("空报告列表与详情不一致: list=%+v detail=%+v", list, run)
+	}
+}
+
+// TestProbeV3ProtocolToolAdmission：合成夹具——工具请求使用 Responses 协议参数，
+// 断言体验块能单独给出工具调用结论，报告仍能持久化和读出。
+func TestProbeV3ProtocolToolAdmission(t *testing.T) {
+	e := newEnv(t)
+	a, id, _ := startV3ProbeRun(t, e, newProbeUpstream(t))
+	run := waitProbeRun(t, a, id)
+	probeReportContract(t, run)
+	if run.Report.Protocol != "responses" {
+		t.Errorf("协议 = %q，want responses", run.Report.Protocol)
+	}
+	if status := probeItemStatus(run, "tool"); status != "pass" {
+		t.Errorf("工具调用应单独通过，实际 %q", status)
+	}
+	if status := probeItemStatus(run, "structured"); status != "pass" {
+		t.Errorf("结构化输出应单独通过，实际 %q", status)
 	}
 }
