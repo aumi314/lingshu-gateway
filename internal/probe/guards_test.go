@@ -30,7 +30,7 @@ func TestNewProbeStopsBeforeBody(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if report.StopReason != test.stop || report.Score != nil || len(report.Items) != 0 {
+			if report.StopReason != test.stop || report.StopMessage == "" || report.Score != nil || len(report.Blocks) != 3 || report.Verdict != "无法判定" {
 				t.Fatalf("unexpected report: reason=%q score=%v items=%v", report.StopReason, report.Score, report.Items)
 			}
 			count := int(sent.Load())

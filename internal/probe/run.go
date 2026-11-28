@@ -63,6 +63,8 @@ type Call struct {
 	ReasoningTokens   int64      `json:"reasoning_tokens"`
 	ReasoningReported bool       `json:"reasoning_reported"`
 	UsageReported     bool       `json:"usage_reported"`
+	InputReported     bool       `json:"input_reported,omitempty"`
+	CacheReported     bool       `json:"cache_reported,omitempty"`
 	ID                string     `json:"id,omitempty"`
 	Model             string     `json:"model,omitempty"`
 	ServiceTier       string     `json:"service_tier,omitempty"`
@@ -74,6 +76,22 @@ type Call struct {
 	UsageFields       []string   `json:"usage_fields,omitempty"`    // messages：message_start 里 usage 的字段名
 	FirstTokenMS      int        `json:"first_token_ms"`
 	TotalMS           int        `json:"total_ms"`
+	VisibleFirstMS    int        `json:"visible_first_ms,omitempty"`
+	VisibleLastMS     int        `json:"visible_last_ms,omitempty"`
+	VisibleEvents     int        `json:"visible_events,omitempty"`
+}
+
+// RecordVisible 记录一个真正有可见正文的事件；空白和不可见内容不计入。
+func (c *Call) RecordVisible(text string, elapsed time.Duration) {
+	if clean(text) == "" {
+		return
+	}
+	ms := max(int(elapsed.Milliseconds()), 1)
+	if c.VisibleFirstMS == 0 {
+		c.VisibleFirstMS = ms
+	}
+	c.VisibleLastMS = ms
+	c.VisibleEvents++
 }
 
 // Caller 向被测渠道发一次请求。实现在 relay（直接打到指定渠道，不走路由、不计费、不进调用日志）。
@@ -109,15 +127,18 @@ func IsProtocolModel(m string) bool {
 type Status string
 
 const (
-	Pass Status = "pass"
-	Warn Status = "warn"
-	Fail Status = "fail"
-	Info Status = "info" // 只作参考，不计分
+	Pass          Status = "pass"
+	Warn          Status = "warn"
+	Fail          Status = "fail"
+	Info          Status = "info" // 只作参考，不计分
+	Unknown       Status = "unknown"
+	NotApplicable Status = "na"
 )
 
 // Item 是一个检测项的结论和依据。
 type Item struct {
 	Key     string         `json:"key"`
+	RuleID  string         `json:"rule_id,omitempty"`
 	Title   string         `json:"title"`
 	Status  Status         `json:"status"`
 	Summary string         `json:"summary"`
@@ -126,6 +147,12 @@ type Item struct {
 
 // Report 是一次检测的完整结果。
 type Report struct {
+	FormatVersion int            `json:"format_version,omitempty"`
+	RuleVersion   string         `json:"rule_version,omitempty"`
+	BaselineID    string         `json:"baseline_id,omitempty"`
+	ChannelKeyID  int64          `json:"channel_key_id,omitempty"`
+	Blocks        []ReportBlock  `json:"blocks,omitempty"`
+	Rules         []ReportRule   `json:"rules,omitempty"`
 	Baseline      string         `json:"baseline"`
 	Mode          string         `json:"mode,omitempty"` // protocol：没有官方样本，只做协议层检测
 	ProbeMode     string         `json:"probe_mode,omitempty"`
@@ -134,9 +161,10 @@ type Report struct {
 	Template      string         `json:"template,omitempty"`      // 完整伪装的模板，如 claude-code 2.1.281
 	TemplateHash  string         `json:"template_hash,omitempty"` // 模板内容 hash
 	SuiteVersion  int            `json:"suite_version"`
-	Score         *int           `json:"score"` // 0–100：通过记 1、警告记 0.5、不通过记 0；指纹档和不完整检测为 null
+	Score         *int           `json:"score"` // 指纹匹配度；新版质量报告为空
 	Verdict       string         `json:"verdict"`
 	StopReason    string         `json:"stop_reason,omitempty"`
+	StopMessage   string         `json:"stop_message,omitempty"`
 	StopCallIndex *int           `json:"stop_call_index,omitempty"`
 	Counts        RunCounts      `json:"counts"`
 	Items         []Item         `json:"items"`
@@ -328,10 +356,13 @@ func Run(ctx context.Context, call Caller, spec Spec, progress Progress) (*Repor
 			calls[i] = Call{Item: plan.reqs[i].Item, Session: plan.reqs[i].Session, Prompt: storedPrompt(plan.reqs[i].Prompt), Error: "检测已取消"}
 		}
 	}
+	quality := !legacy && spec.Mode == ModeQuality
 	var report *Report
-	if stopReason != "" || ctx.Err() != nil {
+	if quality {
+		report = plan.reportQuality(calls, bs[spec.Baseline])
+	} else if stopReason != "" || ctx.Err() != nil {
 		report = &Report{Baseline: spec.Baseline, SuiteVersion: s.Version, Calls: calls, Metrics: metrics(calls)}
-	} else if plan.protocol && (legacy || spec.Mode == ModeQuality) {
+	} else if plan.protocol && legacy {
 		report = plan.reportProtocol(calls)
 	} else {
 		report = plan.report(calls)
@@ -340,7 +371,7 @@ func Run(ctx context.Context, call Caller, spec Spec, progress Progress) (*Repor
 	for _, c := range calls {
 		if c.Error == "检测已取消" {
 			skipped++
-		} else if c.Error != "" || spec.Mode == ModeQuality && c.Item == "reasoning" && qualityReasoningFailure(c) != "" {
+		} else if c.Error != "" || quality && qualityCallIssue(c) != "" {
 			failed++
 		} else {
 			completed++
@@ -348,6 +379,11 @@ func Run(ctx context.Context, call Caller, spec Spec, progress Progress) (*Repor
 	}
 	if !legacy {
 		report.ProbeMode = spec.mode()
+		report.FormatVersion = reportFormatVersion
+		report.BaselineID = reportBaselineID(spec, bs)
+		if !quality {
+			report.RuleVersion = "fingerprint-v1"
+		}
 		if spec.Disguise {
 			report.Disguise, report.Template, report.TemplateHash = true, spec.Template, spec.TemplateHash
 		}
@@ -356,7 +392,10 @@ func Run(ctx context.Context, call Caller, spec Spec, progress Progress) (*Repor
 	stopMu.Lock()
 	report.StopReason = stopReason
 	if stopVerdict != "" {
-		report.Verdict = stopVerdict
+		report.StopMessage = stopVerdict
+		if !quality {
+			report.Verdict = stopVerdict
+		}
 	}
 	if stopIndex >= 0 {
 		report.StopCallIndex = &stopIndex
@@ -367,7 +406,13 @@ func Run(ctx context.Context, call Caller, spec Spec, progress Progress) (*Repor
 	}
 	if report.StopReason == "" && ctx.Err() != nil {
 		report.StopReason = "cancelled"
-		report.Verdict = "检测已取消，结果未完成"
+		report.StopMessage = "检测已取消，结果未完成"
+		if quality && ctx.Err() == context.DeadlineExceeded {
+			report.StopReason, report.StopMessage = "timeout", "检测超时，已中止余下请求"
+		}
+		if !quality {
+			report.Verdict = report.StopMessage
+		}
 		report.Score = nil
 	}
 	return report, nil
@@ -677,11 +722,7 @@ func (p *plan) report(calls []Call) *Report {
 			r.Items = append(r.Items, p.judgePair(by["pair"]))
 		}
 	}
-	if p.legacy {
-		r.Items = append(r.Items, p.judgeReasoning(by["reasoning"], by["effort"], base))
-	} else {
-		r.Items = append(r.Items, p.judgeQualityReasoning(by["reasoning"], base))
-	}
+	r.Items = append(r.Items, p.judgeReasoning(by["reasoning"], by["effort"], base))
 	r.Items = append(r.Items, p.judgeStructured(by["structured"], by["tool"]))
 	r.Items = append(r.Items, p.judgeInstruction(by["instruction"]))
 	if len(by["needle"]) > 0 {
@@ -695,10 +736,6 @@ func (p *plan) report(calls []Call) *Report {
 		anchors = by["anchor"]
 	}
 	r.Observations = disguiseInjection(observe(calls, anchors, by["anchor"], base, sessionNearest), p.spec)
-	if !p.legacy {
-		r.Observations = qualityObservations(r.Observations)
-		scoreInjection(r, p.spec)
-	}
 	r.Metrics = metrics(calls)
 	finalize(r, hint)
 	return r
@@ -772,21 +809,6 @@ var templateBases = map[string]int{
 // 每个请求都多收这一截输入费（2026-11-28 超超多约 1.88 万）；几百以内可能是上游加了一句提示，只标需关注。
 const injectionFailExtra = 1000
 
-// scoreInjection 把完整伪装下已和官方基准比过的注入项从“请求质量”挪进计分的检测项（2026-11-28 用户要求注入计分）；
-// 模板没标定等只作参考的（Info）留在请求质量里。
-func scoreInjection(r *Report, spec Spec) {
-	if !spec.Disguise {
-		return
-	}
-	for i, o := range r.Observations {
-		if o.Key == "injection" && (o.Status == Pass || o.Status == Warn || o.Status == Fail) {
-			r.Items = append(r.Items, o)
-			r.Observations = append(r.Observations[:i:i], r.Observations[i+1:]...)
-			return
-		}
-	}
-}
-
 func disguiseInjection(obs []Item, spec Spec) []Item {
 	if !spec.Disguise {
 		return obs
@@ -852,12 +874,20 @@ func firstError(cs []Call) string {
 }
 
 func (p *plan) judgeTokens(cs []Call, base *Baseline) Item {
-	if it, bad := errorItem("tokens", "分词指纹", unblocked(cs)); bad {
+	quality := p.spec.Mode == ModeQuality
+	issue := func(c Call) string { return c.Error }
+	inputReported := func(c Call) bool { return c.UsageReported }
+	uncertain := Warn
+	if quality {
+		issue, uncertain = qualityCallIssue, Unknown
+		inputReported = func(c Call) bool { return c.InputReported }
+	} else if it, bad := errorItem("tokens", "分词指纹", unblocked(cs)); bad {
 		return it
 	}
+	thresholds := qualityRules["tokens"].Thresholds
 	it := Item{Key: "tokens", Title: "分词指纹"}
-	if base == nil || len(cs) != 3+len(p.tokenNames) || cs[2].Error != "" || !cs[2].UsageReported {
-		it.Status, it.Summary = Warn, "分词基准或用量缺失，无法比对"
+	if base == nil || len(p.tokenNames) == 0 || len(cs) != 3+len(p.tokenNames) || issue(cs[2]) != "" || !inputReported(cs[2]) {
+		it.Status, it.Summary = uncertain, "分词基准或用量缺失，无法比对"
 		return it
 	}
 	anchor := cs[2].InputTokens
@@ -869,7 +899,7 @@ func (p *plan) judgeTokens(cs []Call, base *Baseline) Item {
 		if policyBlocked(c) {
 			blocked = append(blocked, name)
 		}
-		if c.Error != "" || !c.UsageReported || anchor == 0 {
+		if issue(c) != "" || !inputReported(c) || anchor <= 0 {
 			continue
 		}
 		d := c.InputTokens - anchor
@@ -877,7 +907,7 @@ func (p *plan) judgeTokens(cs []Call, base *Baseline) Item {
 		total++
 		if ref, ok := base.TokenDeltas[name]; ok {
 			offsets = append(offsets, d-int64(ref))
-			if abs(d-int64(ref)) <= 1 {
+			if abs(d-int64(ref)) <= thresholds["tolerance_tokens"] {
 				match++
 			}
 		}
@@ -886,16 +916,19 @@ func (p *plan) judgeTokens(cs []Call, base *Baseline) Item {
 	extra, shifted := fixedOffset(offsets)
 	// 被中转按内容拦掉的探针单独说明；其余至少三分之二时照常比对
 	switch {
-	case total < len(p.tokenNames)-len(blocked) || total*3 < len(p.tokenNames)*2:
-		it.Status, it.Summary = Warn, "分词请求的输入用量不完整，无法比对"
-	case match*6 >= total*5:
+	case total < len(p.tokenNames)-len(blocked) || int64(total)*thresholds["coverage_denominator"] < int64(len(p.tokenNames))*thresholds["coverage_numerator"] || quality && len(offsets) != total:
+		it.Status, it.Summary = uncertain, "分词请求的输入用量不完整，无法比对"
+	case int64(match)*thresholds["match_denominator"] >= int64(total)*thresholds["match_numerator"]:
 		it.Status, it.Summary = Pass, fmt.Sprintf("%d / %d 段探针文本的 token 数和官方一致，分词器同属一个家族", match, total)
 	case extra != 0:
 		// 偏差只有 0 和一个固定数：分词器一致，是部分请求被上游固定多塞了一段（2026-11-08 超超 claude：7 段 +28）
 		it.Details["extra_tokens"] = extra
 		it.Status, it.Summary = Warn, fmt.Sprintf("分词器和官方一致；%d / %d 个请求多出固定的 %d 个 token：上游有不固定的注入，这部分也会计费", shifted, total, extra)
-	case match*2 >= total:
-		it.Status, it.Summary = Warn, fmt.Sprintf("只有 %d / %d 段和官方一致", match, total)
+		if quality {
+			it.Status, it.Summary = Pass, fmt.Sprintf("分词差值属于同一分词器家族；%d/%d 个请求相对对照偏移 %d token", shifted, total, extra)
+		}
+	case int64(match)*100 >= int64(total)*thresholds["mismatch_cutoff_pct"]:
+		it.Status, it.Summary = uncertain, fmt.Sprintf("只有 %d / %d 段和官方一致", match, total)
 	default:
 		it.Status, it.Summary = Fail, fmt.Sprintf("只有 %d / %d 段和官方一致，分词器很可能不是这个家族", match, total)
 	}
@@ -908,20 +941,22 @@ func (p *plan) judgeTokens(cs []Call, base *Baseline) Item {
 // fixedOffset 判断偏差是否只有“0 附近”和“某一个固定数附近”两种（允许 ±1）：是的话返回那个固定数和它出现的次数，否则返回 0。
 // 换了分词器时偏差各不相同（kinght claude：-47 到 +4），被固定注入时整整齐齐。
 func fixedOffset(offsets []int64) (int64, int) {
+	thresholds := qualityRules["tokens"].Thresholds
+	tolerance := thresholds["tolerance_tokens"]
 	var c int64
 	n := 0
 	for _, o := range offsets {
 		switch {
-		case abs(o) <= 1:
+		case abs(o) <= tolerance:
 		case c == 0:
 			c, n = o, 1
-		case abs(o-c) <= 1:
+		case abs(o-c) <= tolerance:
 			n++
 		default:
 			return 0, 0
 		}
 	}
-	if n < 2 { // 只有一段偏了，说明不了是固定注入
+	if int64(n) < thresholds["fixed_offset_min_samples"] { // 只有一段偏了，说明不了是固定注入
 		return 0, 0
 	}
 	return c, n

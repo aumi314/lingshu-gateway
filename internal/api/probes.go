@@ -265,6 +265,7 @@ func (s *Server) runProbe(run store.ProbeRun, ch *store.Channel) {
 	})
 	if report != nil {
 		report.Protocol = protocolName
+		report.ChannelKeyID = ch.SecretKeyID
 	}
 	finish := context.Background()
 	if err != nil {
@@ -296,7 +297,7 @@ func (s *Server) probeCost(ctx context.Context, model string, calls []probe.Call
 		prices := billing.Prices{Input: m.InputPrice, Output: m.OutputPrice, CacheRead: m.CacheReadPrice, CacheWrite: m.CacheWritePrice}
 		total := decimal.Zero
 		for _, c := range calls {
-			u := usage.Usage{Input: c.InputTokens - c.CachedTokens, CacheRead: c.CachedTokens, Output: c.OutputTokens}
+			u := usage.Usage{Input: max(0, c.InputTokens-c.CachedTokens), CacheRead: max(0, c.CachedTokens), Output: c.OutputTokens}
 			total = total.Add(billing.Cost(u, prices, decimal.NewFromInt(1)))
 		}
 		return total

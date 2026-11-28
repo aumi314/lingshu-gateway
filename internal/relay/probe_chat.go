@@ -170,6 +170,7 @@ func (h *Handler) probeChatOnce(ctx context.Context, ch *store.Channel, upstream
 				if (m.Content != "" || len(m.ToolCalls) > 0) && c.FirstTokenMS == 0 {
 					c.FirstTokenMS = max(int(time.Since(start).Milliseconds()), 1)
 				}
+				c.RecordVisible(m.Content, time.Since(start))
 				text.WriteString(m.Content)
 				for _, tc := range m.ToolCalls { // 流式里工具调用按 index 分片发，名字和参数要拼起来
 					for len(tools) <= tc.Index {

@@ -60,6 +60,24 @@ func (t *Tracker) Seen() bool {
 	return len(t.fields) > 0
 }
 
+func (t *Tracker) ReportedInput() (int64, bool) {
+	field := "input"
+	if t.proto == Chat {
+		field = "prompt"
+	}
+	input, reported := t.fields[field]
+	return input, reported
+}
+
+func (t *Tracker) CacheReadReported() bool {
+	field := "cached"
+	if t.proto == Messages {
+		field = "cache_read"
+	}
+	_, reported := t.fields[field]
+	return reported
+}
+
 func (t *Tracker) set(name string, v *int64) {
 	if v != nil {
 		t.fields[name] = *v

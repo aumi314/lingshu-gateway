@@ -149,7 +149,8 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 	}
 
 	tracker := usage.NewTracker(usage.Messages)
-	qualityReasoning := req.Item == "reasoning" && req.DisguiseSet && req.FullDisguise
+	quality := req.DisguiseSet && req.FullDisguise
+	qualityReasoning := req.Item == "reasoning" && quality
 	type thinkingDetails struct {
 		ThinkingTokens *int64 `json:"thinking_tokens"`
 	}
@@ -189,6 +190,7 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 				Type      string `json:"type"`
 				Name      string `json:"name"`
 				Signature string `json:"signature"`
+				Text      string `json:"text"`
 			} `json:"content_block"`
 			Delta struct {
 				Type        string `json:"type"`
@@ -221,6 +223,10 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 		case "content_block_start":
 			b := at(ev.Index)
 			b.kind, b.name, b.signature = ev.ContentBlock.Type, ev.ContentBlock.Name, ev.ContentBlock.Signature
+			if ev.ContentBlock.Type == "text" {
+				c.RecordVisible(ev.ContentBlock.Text, time.Since(start))
+				text.WriteString(ev.ContentBlock.Text)
+			}
 		case "content_block_delta":
 			if c.FirstTokenMS == 0 {
 				c.FirstTokenMS = max(int(time.Since(start).Milliseconds()), 1)
@@ -228,6 +234,7 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 			b := at(ev.Index)
 			switch ev.Delta.Type {
 			case "text_delta":
+				c.RecordVisible(ev.Delta.Text, time.Since(start))
 				text.WriteString(ev.Delta.Text)
 			case "signature_delta":
 				b.signature += ev.Delta.Signature
@@ -250,7 +257,7 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 		for {
 			ev, err := reader.Next()
 			if err != nil {
-				if qualityReasoning && c.Error == "" && !errors.Is(err, io.EOF) {
+				if quality && c.Error == "" && !c.Done && !errors.Is(err, io.EOF) {
 					c.Error = "读取流失败: " + err.Error()
 				}
 				break
@@ -259,7 +266,7 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 			tracker.ObserveEvent(ev.Data)
 			parse(ev.Data)
 		}
-		if qualityReasoning && !c.Done && c.Error == "" {
+		if quality && !c.Done && c.Error == "" {
 			c.Error = "流在正常结束前断开（没有 message_stop）"
 		}
 	} else {
@@ -311,6 +318,8 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 	if tracker.Seen() {
 		u := tracker.Result()
 		c.UsageReported = true
+		_, c.InputReported = tracker.ReportedInput()
+		c.CacheReported = tracker.CacheReadReported()
 		c.InputTokens = u.Input + u.CacheRead + u.CacheWrite
 		c.CachedTokens = u.CacheRead
 		c.OutputTokens = u.Output
