@@ -24,8 +24,8 @@ func (h *Handler) ProbeResponses(ctx context.Context, ch *store.Channel, upstrea
 	return effortFallback(ctx, req, func(r probe.Request) probe.Call { return h.probeResponsesOnce(ctx, ch, upstreamModel, session, r) })
 }
 
-func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, upstreamModel, session string, req probe.Request) probe.Call {
-	var c probe.Call
+func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, upstreamModel, session string, req probe.Request) (c probe.Call) {
+	c.NotSent = true
 	if ch.BaseURLResponses == "" {
 		c.Error = "这个渠道没有配置 Responses 协议的地址"
 		return c
@@ -122,20 +122,32 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 	setUpstreamAuth(hd, usage.Responses, ch.APIKey)
 
 	start := time.Now()
+	if ctx.Err() != nil {
+		c.Error = "检测已取消"
+		return c
+	}
+	c.NotSent = false
+	tracker := newProbeUsage(usage.Responses)
+	effort, _ := reasoning["effort"].(string)
+	if actual, ok := body["reasoning"].(map[string]any); ok {
+		effort, _ = actual["effort"].(string)
+	}
+	defer tracker.finish(&c, req, effort, start)
 	resp, err := h.clientFor(ch.ProxyURL).Do(httpReq)
 	if err != nil {
 		c.Error = "连接失败: " + err.Error()
+		c.AttemptError = probeReadError(ctx, err, "connection_error")
 		return c
 	}
 	defer resp.Body.Close()
 	c.HTTPStatus = resp.StatusCode
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		captureProbeError(resp, b, tracker)
 		c.Error = fmt.Sprintf("HTTP %d %s", resp.StatusCode, truncate(string(redactKey(b, ch.APIKey)), 300))
 		return c
 	}
 
-	tracker := usage.NewTracker(usage.Responses)
 	quality := req.DisguiseSet && req.FullDisguise
 	var out strings.Builder
 	type item struct {
@@ -196,12 +208,14 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 			}
 			final = ev.Response.Output
 		case "response.failed":
+			c.AttemptError = "upstream_error"
 			msg := "上游报告失败"
 			if ev.Response.Error != nil {
 				msg += ": " + ev.Response.Error.Message
 			}
 			c.Error = truncate(msg, 300)
 		case "error":
+			c.AttemptError = "upstream_error"
 			c.Error = truncate("上游在流中报错: "+ev.Message, 300)
 		}
 	}
@@ -210,6 +224,9 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 		for {
 			ev, err := reader.Next()
 			if err != nil {
+				if c.AttemptError == "" && !c.Done && (ctx.Err() != nil || !errors.Is(err, io.EOF)) {
+					c.AttemptError = probeReadError(ctx, err, "stream_interrupted")
+				}
 				if quality && c.Error == "" && !c.Done && !errors.Is(err, io.EOF) {
 					c.Error = "读取流失败: " + err.Error()
 				}
@@ -221,6 +238,10 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 		}
 	} else { // 要了流式却回了整段 JSON：按 response 对象解析，Done 记为 false，请求质量里会提示
 		b, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		c.BodyComplete = err == nil && json.Valid(b)
+		if err != nil {
+			c.AttemptError = probeReadError(ctx, err, "read_error")
+		}
 		if quality && err != nil {
 			c.Error = "读取响应失败: " + err.Error()
 		}
@@ -235,7 +256,6 @@ func (h *Handler) probeResponsesOnce(ctx context.Context, ch *store.Channel, ups
 			c.ID, c.Model, c.FinishReason, final = r.ID, r.Model, r.Status, r.Output
 		}
 	}
-	c.TotalMS = int(time.Since(start).Milliseconds())
 	c.Text = out.String()
 	for _, it := range final {
 		switch it.Type {

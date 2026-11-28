@@ -37,8 +37,8 @@ var probeClaudeSDKHeaders = map[string]string{
 // ProbeMessages 向渠道发一次 Claude 检测请求（Messages 协议、流式），和 ProbeChat 一样直接用渠道自己的地址、key 和代理：
 // 不走路由、不计费、不写调用日志、不影响渠道健康状态。req.Effort 非空时开 adaptive thinking 并设推理强度。
 // session 放进 metadata.user_id 的 session_id：号池按会话路由，一个检测会话像一段 Claude Code 对话。
-func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstreamModel, session string, req probe.Request) probe.Call {
-	var c probe.Call
+func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstreamModel, session string, req probe.Request) (c probe.Call) {
+	c.NotSent = true
 	if ch.BaseURLMessages == "" {
 		c.Error = "这个渠道没有配置 Messages 协议的地址"
 		return c
@@ -135,20 +135,28 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 	setUpstreamAuth(hd, usage.Messages, ch.APIKey)
 
 	start := time.Now()
+	if ctx.Err() != nil {
+		c.Error = "检测已取消"
+		return c
+	}
+	c.NotSent = false
+	tracker := newProbeUsage(usage.Messages)
+	defer tracker.finish(&c, req, req.Effort, start)
 	resp, err := h.clientFor(ch.ProxyURL).Do(httpReq)
 	if err != nil {
 		c.Error = "连接失败: " + err.Error()
+		c.AttemptError = probeReadError(ctx, err, "connection_error")
 		return c
 	}
 	defer resp.Body.Close()
 	c.HTTPStatus = resp.StatusCode
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		captureProbeError(resp, b, tracker)
 		c.Error = fmt.Sprintf("HTTP %d %s", resp.StatusCode, truncate(string(redactKey(b, ch.APIKey)), 300))
 		return c
 	}
 
-	tracker := usage.NewTracker(usage.Messages)
 	quality := req.DisguiseSet && req.FullDisguise
 	qualityReasoning := req.Item == "reasoning" && quality
 	type thinkingDetails struct {
@@ -249,6 +257,7 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 		case "message_stop":
 			c.Done = true
 		case "error": // 已经回了 200 再在流里报错（上下文超长、过载等）：算请求失败，不当成模型答错
+			c.AttemptError = "upstream_error"
 			c.Error = truncate("上游在流中报错: "+ev.Error.Type+" "+ev.Error.Message, 300)
 		}
 	}
@@ -257,6 +266,9 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 		for {
 			ev, err := reader.Next()
 			if err != nil {
+				if !c.Done && c.AttemptError == "" {
+					c.AttemptError = probeReadError(ctx, err, "stream_interrupted")
+				}
 				if quality && c.Error == "" && !c.Done && !errors.Is(err, io.EOF) {
 					c.Error = "读取流失败: " + err.Error()
 				}
@@ -271,6 +283,10 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 		}
 	} else {
 		b, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		c.BodyComplete = err == nil && json.Valid(b)
+		if err != nil {
+			c.AttemptError = probeReadError(ctx, err, "read_error")
+		}
 		if qualityReasoning && err != nil {
 			c.Error = "读取响应失败: " + err.Error()
 		}
@@ -303,7 +319,6 @@ func (h *Handler) ProbeMessages(ctx context.Context, ch *store.Channel, upstream
 			}
 		}
 	}
-	c.TotalMS = int(time.Since(start).Milliseconds())
 	c.Text = text.String()
 	for _, b := range blocks {
 		switch b.kind {

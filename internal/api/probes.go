@@ -279,13 +279,13 @@ func (s *Server) runProbe(run store.ProbeRun, ch *store.Channel) {
 	if report.StopReason != "" {
 		status = "failed"
 	}
-	if e := s.Store.FinishProbeRun(finish, run.ID, status, report.Score, report.Verdict, s.probeCost(finish, run.Model, report.Calls), raw); e != nil {
+	if e := s.Store.FinishProbeRun(finish, run.ID, status, report.Score, report.Verdict, s.probeCost(finish, run.Model, report.Attempts), raw); e != nil {
 		slog.Error("写检测结果失败", "id", run.ID, "err", e)
 	}
 }
 
 // probeCost 按站内模型的基础价估算本次检测的花费（上游实际怎么收费取决于渠道）。
-func (s *Server) probeCost(ctx context.Context, model string, calls []probe.Call) decimal.Decimal {
+func (s *Server) probeCost(ctx context.Context, model string, attempts []probe.Attempt) decimal.Decimal {
 	models, err := s.Store.ListModels(ctx)
 	if err != nil {
 		return decimal.Zero
@@ -296,9 +296,10 @@ func (s *Server) probeCost(ctx context.Context, model string, calls []probe.Call
 		}
 		prices := billing.Prices{Input: m.InputPrice, Output: m.OutputPrice, CacheRead: m.CacheReadPrice, CacheWrite: m.CacheWritePrice}
 		total := decimal.Zero
-		for _, c := range calls {
-			u := usage.Usage{Input: max(0, c.InputTokens-c.CachedTokens), CacheRead: max(0, c.CachedTokens), Output: c.OutputTokens}
-			total = total.Add(billing.Cost(u, prices, decimal.NewFromInt(1)))
+		for _, attempt := range attempts {
+			counts := attempt.Usage
+			tokens := usage.Usage{Input: counts.Input, CacheRead: counts.CacheRead, CacheWrite: counts.CacheWrite, Output: counts.Output}
+			total = total.Add(billing.Cost(tokens, prices, decimal.NewFromInt(1)))
 		}
 		return total
 	}

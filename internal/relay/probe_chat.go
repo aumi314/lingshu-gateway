@@ -45,14 +45,16 @@ func effortFallback(ctx context.Context, req probe.Request, once func(probe.Requ
 	}
 	if by := noneRejected(c); req.Effort == "none" && by != "" {
 		req.Effort = "low"
+		req.RetryReason = "effort_none_rejected_" + by
 		c = once(req)
 		c.EffortSent, c.NoneRejectedBy = "low", by
 		if c.HTTPStatus != http.StatusBadRequest {
 			return c
 		}
 	}
-	if msg := strings.ToLower(c.Error); c.HTTPStatus == http.StatusBadRequest && (strings.Contains(msg, "reasoning") || strings.Contains(msg, "'"+req.Effort+"'")) {
+	if msg := strings.ToLower(c.Error); ctx.Err() == nil && c.HTTPStatus == http.StatusBadRequest && (strings.Contains(msg, "reasoning") || strings.Contains(msg, "'"+req.Effort+"'")) {
 		req.Effort = ""
+		req.RetryReason = "effort_rejected"
 		c = once(req)
 		c.EffortSent = "default"
 	}
@@ -71,8 +73,8 @@ func noneRejected(c probe.Call) string {
 	return ""
 }
 
-func (h *Handler) probeChatOnce(ctx context.Context, ch *store.Channel, upstreamModel, session string, req probe.Request) probe.Call {
-	var c probe.Call
+func (h *Handler) probeChatOnce(ctx context.Context, ch *store.Channel, upstreamModel, session string, req probe.Request) (c probe.Call) {
+	c.NotSent = true
 	if ch.BaseURLChat == "" {
 		c.Error = "这个渠道没有配置 Chat 协议的地址"
 		return c
@@ -118,20 +120,28 @@ func (h *Handler) probeChatOnce(ctx context.Context, ch *store.Channel, upstream
 	setUpstreamAuth(hd, usage.Chat, ch.APIKey)
 
 	start := time.Now()
+	if ctx.Err() != nil {
+		c.Error = "检测已取消"
+		return c
+	}
+	c.NotSent = false
+	tracker := newProbeUsage(usage.Chat)
+	defer tracker.finish(&c, req, req.Effort, start)
 	resp, err := h.clientFor(ch.ProxyURL).Do(httpReq)
 	if err != nil {
 		c.Error = "连接失败: " + err.Error()
+		c.AttemptError = probeReadError(ctx, err, "connection_error")
 		return c
 	}
 	defer resp.Body.Close()
 	c.HTTPStatus = resp.StatusCode
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		captureProbeError(resp, b, tracker)
 		c.Error = fmt.Sprintf("HTTP %d %s", resp.StatusCode, truncate(string(redactKey(b, ch.APIKey)), 300))
 		return c
 	}
 
-	tracker := usage.NewTracker(usage.Chat)
 	qualityReasoning := req.Item == "reasoning" && req.DisguiseSet && req.FullDisguise
 	var text strings.Builder
 	type partial struct{ name, args strings.Builder }
@@ -153,8 +163,11 @@ func (h *Handler) probeChatOnce(ctx context.Context, ch *store.Channel, upstream
 		if json.Unmarshal(data, &ev) != nil {
 			return
 		}
-		if qualityReasoning && ev.Error != nil {
-			c.Error = truncate("上游报错: "+ev.Error.Message, 300)
+		if ev.Error != nil {
+			c.AttemptError = "upstream_error"
+			if qualityReasoning {
+				c.Error = truncate("上游报错: "+ev.Error.Message, 300)
+			}
 		}
 		if ev.ID != "" {
 			c.ID = ev.ID
@@ -190,6 +203,9 @@ func (h *Handler) probeChatOnce(ctx context.Context, ch *store.Channel, upstream
 		for {
 			ev, err := reader.Next()
 			if err != nil {
+				if !c.Done && c.AttemptError == "" {
+					c.AttemptError = probeReadError(ctx, err, "stream_interrupted")
+				}
 				if qualityReasoning && c.Error == "" && !errors.Is(err, io.EOF) {
 					c.Error = "读取流失败: " + err.Error()
 				}
@@ -208,13 +224,16 @@ func (h *Handler) probeChatOnce(ctx context.Context, ch *store.Channel, upstream
 		}
 	} else { // 要了流式却回了整段 JSON：照样解析，Done 记为 false，请求质量里会提示
 		b, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		c.BodyComplete = err == nil && json.Valid(b)
+		if err != nil {
+			c.AttemptError = probeReadError(ctx, err, "read_error")
+		}
 		if qualityReasoning && err != nil {
 			c.Error = "读取响应失败: " + err.Error()
 		}
 		tracker.ObserveBody(b)
 		parse(b)
 	}
-	c.TotalMS = int(time.Since(start).Milliseconds())
 	c.Text = text.String()
 	for _, t := range tools {
 		c.ToolCalls = append(c.ToolCalls, probe.ToolCall{Name: t.name.String(), Arguments: t.args.String()})

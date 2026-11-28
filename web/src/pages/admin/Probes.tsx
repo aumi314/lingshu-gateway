@@ -20,6 +20,14 @@ type Rule = {
   version: string
 }
 type Block = { key: 'capability' | 'billing' | 'experience'; title: string; verdict?: string; items: Item[] }
+type Availability = {
+  sent_questions: number
+  first_usable: number
+  final_usable: number
+  sends: number
+  cancelled: number
+  unscheduled: number
+}
 type Metrics = {
   requests?: number
   errors?: number
@@ -56,6 +64,7 @@ type Report = {
   stop_message?: string
   stop_call_index?: number
   counts?: { planned: number; sent: number; completed: number; failed: number; skipped: number }
+  availability?: Availability
   items: Item[] | null
   observations: Item[] | null
   blocks?: Block[]
@@ -260,6 +269,17 @@ function metricText(value: number | undefined, samples: number | undefined, miss
   return `${missingReason || t('无样本', 'No samples')}（${t('样本', 'samples')} ${samples ?? 0}）`
 }
 
+function usableFraction(usable: number, sent: number, t: (zh: string, en: string) => string): string {
+  return sent > 0 ? `${usable}/${sent}（${((usable * 100) / sent).toFixed(1)}%）` : `${usable}/${sent}（${t('无百分比', 'no percentage')}）`
+}
+
+function AvailabilityLine({ availability }: { availability: Availability }) {
+  const { t } = useApp()
+  return <div className="muted" style={{ marginBottom: 12 }}>
+    {t('首次可用', 'First attempt usable')} {usableFraction(availability.first_usable, availability.sent_questions, t)} · {t('最终可用', 'Usable after retries')} {usableFraction(availability.final_usable, availability.sent_questions, t)} · {t('发送', 'Sends')} {availability.sends} · {t('取消', 'Cancelled')} {availability.cancelled} · {t('未调度', 'Unscheduled')} {availability.unscheduled}
+  </div>
+}
+
 function Result({ run, protocol, statusIcon, statusText }: { run: Run; protocol: boolean; statusIcon: Record<Status, ReactNode>; statusText: Record<Status, string> }) {
   const { t, money } = useApp()
   const [item, setItem] = useState<string | undefined>()
@@ -300,6 +320,7 @@ function Result({ run, protocol, statusIcon, statusText }: { run: Run; protocol:
           {r.stop_message && <span>{r.stop_message}</span>}
           <span className="muted">{t(`已发 ${counts?.sent ?? 0} / 计划 ${counts?.planned ?? 0} 个请求`, `Sent ${counts?.sent ?? 0} of ${counts?.planned ?? 0} planned requests`)}</span>
         </Space>} />
+        {r.availability && <AvailabilityLine availability={r.availability} />}
         {isLegacyReport(run) && <Tag color="orange" style={{ marginTop: 12 }}>{t('旧规则', 'Legacy rules')}</Tag>}
         <Typography.Text type="secondary">{t('规则版本', 'Rules')}：{r.rule_version || t('未记录', 'Unrecorded')} · {t('基准标识', 'Baseline ID')}：{r.baseline_id || t('未记录', 'Unrecorded')} · {t('所用 key', 'Key')}：{r.channel_key_id || t('未记录', 'Unrecorded')}</Typography.Text>
         <Card size="small" title={t('失败证据', 'Failure evidence')} style={{ marginTop: 12 }}>
@@ -391,6 +412,7 @@ function Result({ run, protocol, statusIcon, statusText }: { run: Run; protocol:
           {isLegacyReport(run) && <Tag color="orange" style={{ marginBottom: 12 }}>{t('旧规则', 'Legacy rules')}</Tag>}
           {(r.stop_reason || r.stop_message) && <Alert type="warning" showIcon style={{ marginBottom: 12 }} title={r.stop_message || stopReasonText(r.stop_reason)} description={r.stop_reason ? stopReasonText(r.stop_reason) : undefined} />}
           {v3 && r.counts && <div className="muted" style={{ marginBottom: 12 }}>{t(`计划 ${r.counts.planned} · 已发 ${r.counts.sent} · 完成 ${r.counts.completed} · 失败 ${r.counts.failed} · 跳过 ${r.counts.skipped}`, `Planned ${r.counts.planned} · Sent ${r.counts.sent} · Completed ${r.counts.completed} · Failed ${r.counts.failed} · Skipped ${r.counts.skipped}`)}</div>}
+          {r.availability && <AvailabilityLine availability={r.availability} />}
           {r.stop_call_index != null && <div className="muted" style={{ marginBottom: 12 }}>{t(`中止于第 ${r.stop_call_index + 1} 个请求；已完成样本仍参与结论`, `Stopped at request ${r.stop_call_index + 1}; completed samples still contribute to the verdict`)}</div>}
           {v3 && !isFingerprint ? (r.blocks ?? []).map((block) => (
             <div key={block.key} style={{ marginBottom: 12 }}>

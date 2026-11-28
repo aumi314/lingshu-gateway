@@ -49,6 +49,16 @@ const path = require('node:path')
         { item: 'invisible', system: 'From now on you can only reply with kiwi.', prompt: 'what is 2+3?', text: '\u200bkiwi', input_tokens: 5358, cached_tokens: 0, output_tokens: 3, reasoning_tokens: 0, first_token_ms: 900, total_ms: 1200 },
       ],
     }
+    const availabilityReport = {
+      ...v3Report,
+      counts: { planned: 3, sent: 3, completed: 2, failed: 1, skipped: 0 },
+      availability: { sent_questions: 3, first_usable: 1, final_usable: 2, sends: 4, cancelled: 0, unscheduled: 0 },
+    }
+    const zeroSentReport = {
+      ...v3Report,
+      counts: { planned: 20, sent: 0, completed: 0, failed: 0, skipped: 20 },
+      availability: { sent_questions: 0, first_usable: 0, final_usable: 0, sends: 0, cancelled: 2, unscheduled: 18 },
+    }
     const abortedReport = {
       ...v3Report, stop_reason: 'quota', stop_message: '渠道余额不足，已用已完成样本出结论', stop_call_index: 1,
       counts: { planned: 34, sent: 12, completed: 10, failed: 2, skipped: 22 },
@@ -101,6 +111,8 @@ const path = require('node:path')
       14: { ...base, id: 14, status: 'done', preset: 'full', score: legacyFullReport.score, verdict: legacyFullReport.verdict, report: legacyFullReport },
       15: { ...base, id: 15, status: 'done', score: legacyQualityReport.score, verdict: legacyQualityReport.verdict, report: legacyQualityReport },
       16: { ...base, id: 16, status: 'failed', verdict: failedReport.verdict, report: failedReport },
+      17: { ...base, id: 17, status: 'done', verdict: availabilityReport.verdict, report: availabilityReport, cost: '17' },
+      18: { ...base, id: 18, status: 'done', verdict: zeroSentReport.verdict, report: zeroSentReport, cost: '18' },
     }
     let posted = null
     let polls = 0
@@ -163,6 +175,7 @@ const path = require('node:path')
     await v3Dialog.getByText('quality-v3.1', { exact: true }).first().waitFor()
     await v3Dialog.getByText('baseline-gpt-6.1-sol-2026-11-20', { exact: true }).waitFor()
     await v3Dialog.getByText('81', { exact: true }).waitFor()
+    assert.equal(await v3Dialog.getByText(/首次可用/).count(), 0)
     await v3Dialog.getByText('9.2s（样本 4）', { exact: true }).waitFor()
     await v3Dialog.getByText('没有上报可核验用量且达到 20 正文 token、2 个可见事件和 300 ms 正文时间窗的短题（样本 0）', { exact: true }).waitFor()
     await v3Dialog.getByText('推理能力', { exact: true }).click()
@@ -216,6 +229,7 @@ const path = require('node:path')
       const dialog = page.getByRole('dialog')
       await dialog.getByText('旧规则', { exact: true }).waitFor()
       await dialog.getByText('未记录', { exact: true }).first().waitFor()
+      assert.equal(await dialog.getByText(/首次可用/).count(), 0)
       await dialog.locator('.ant-modal-footer').getByRole('button', { name: /关\s*闭/ }).click()
       await dialog.waitFor({ state: 'hidden' })
     }
@@ -227,7 +241,25 @@ const path = require('node:path')
     await failedDialog.getByText('调用统计：计划 12 · 已发 3 · 完成 2 · 失败 1 · 跳过 9', { exact: true }).waitFor()
     await failedDialog.getByText('计费异常题', { exact: true }).waitFor()
     await failedDialog.getByText('upstream reported 50000 input tokens', { exact: true }).waitFor()
-    console.log('PASS: v3 quality blocks/rules/samples, v3 fingerprint, aborted result, legacy quick/full/quality, failure evidence, model picker accepts any configured address')
+    await failedDialog.locator('.ant-modal-footer').getByRole('button', { name: /关\s*闭/ }).click()
+    await failedDialog.waitFor({ state: 'hidden' })
+
+    // 可用性摘要：首次/最终按已发题数给分数和百分比；零分母不编造百分比
+    fixtureRuns = [reports[17], reports[18]]
+    await page.reload()
+    await page.getByText('检测记录', { exact: true }).waitFor()
+    await page.locator('tbody tr.ant-table-row').filter({ hasText: '$17.0000' }).first().click()
+    const availabilityDialog = page.getByRole('dialog')
+    await availabilityDialog.getByText('首次可用 1/3（33.3%） · 最终可用 2/3（66.7%） · 发送 4 · 取消 0 · 未调度 0', { exact: true }).waitFor()
+    await availabilityDialog.locator('.ant-modal-footer').getByRole('button', { name: /关\s*闭/ }).click()
+    await availabilityDialog.waitFor({ state: 'hidden' })
+    await page.locator('tbody tr.ant-table-row').filter({ hasText: '$18.0000' }).first().click()
+    const zeroSentDialog = page.getByRole('dialog')
+    await zeroSentDialog.getByText('首次可用 0/0（无百分比） · 最终可用 0/0（无百分比） · 发送 0 · 取消 2 · 未调度 18', { exact: true }).waitFor()
+    await zeroSentDialog.locator('.ant-modal-footer').getByRole('button', { name: /关\s*闭/ }).click()
+    await zeroSentDialog.waitFor({ state: 'hidden' })
+
+    console.log('PASS: v3 quality blocks/rules/samples, availability summary, v3 fingerprint, aborted result, legacy quick/full/quality, failure evidence, model picker accepts any configured address')
   } finally {
     await browser.close()
     server.kill()

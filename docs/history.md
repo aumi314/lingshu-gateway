@@ -879,3 +879,8 @@ DMIT 模型 ID 1 `deepseek-v4.1-flash` 在保留周末谷价的基础上补齐 U
 - 被替代的计分口径：旧质量分按通过 1、关注 0.5、不通过 0 平均，没测成不计分；同模板注入多出 150–1000 token 需关注，超过 1000 判不达标；缓存前缀接续率 97% 以上通过，其余最差需关注并记半分，超过 102% 判报数异常。新报告将账块与能力分开，不对账块打分。
 - 本地验收：Go 构建、全量 `go vet`、probe 单测（四个摘要合成案例、阈值、缺测、中止等）、不监听端口的 relay 测试、前端类型检查及浏览器脚本语法检查通过。未连数据库、未启动 Docker 或浏览器，未调用真实上游。
 - 待 Claude 在可用环境运行：`go test ./internal/api -run '^TestProbe' -count=1`、`node web/tests/probes.browser.cjs`。前者覆盖两协议质量、独立指纹、协议准入、明确零推理后额度中止、全空响应、调用计数与列表/详情一致；后者用固定 JSON 覆盖 v3、指纹、历史 quick/full/quality 和中止后的页面。
+
+## 2026-11-28 · 渠道检测逐次发送（改造第一阶段）
+
+- 报告新增 `attempts` 和 `availability`，原答卷与规则版本保留；费用按真实尝试估算，失败有用量也计入。老报告无需迁移。本地验证：构建、全仓 `go vet`、probe 单测、无监听端口的 relay 测试、前端类型检查通过。
+- API 和浏览器待跑：`go test ./internal/api -run '^TestProbe' -count=1`（含 `TestProbeFailedAttemptCostWithCacheWrite`），`node web/tests/probes.browser.cjs`（含可用率、零分母、历史报告）。
